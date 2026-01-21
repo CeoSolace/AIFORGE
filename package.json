@@ -12,6 +12,7 @@
     "express": "^4.19.2",
     "express-session": "^1.18.0",
     "mongoose": "^8.4.0",
-    "openai": "^4.50.0"
+    "openai": "^4.50.0",
+    "validator": "^13.12.0"
   }
 }
