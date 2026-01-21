@@ -1,4 +1,6 @@
-// app.js — Fully fixed for Render.com: session, inline EJS, OpenAI, admin logic
+// app.js — AIForge (fixed, production-ready version for Render.com)
+// January 2025 – inline EJS, no views folder needed
+
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -7,37 +9,45 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const { OpenAI } = require('openai');
 const validator = require('validator');
+const ejs = require('ejs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Validate critical env vars
-if (!process.env.OPENAI_API_KEY) {
-  console.error('❌ Missing OPENAI_API_KEY in environment');
-  process.exit(1);
-}
-if (!process.env.MONGODB_URI) {
-  console.error('❌ Missing MONGODB_URI in environment');
-  process.exit(1);
+// ────────────────────────────────────────────────
+//  Critical Environment Checks
+// ────────────────────────────────────────────────
+const requiredEnv = ['OPENAI_API_KEY', 'MONGODB_URI', 'SESSION_SECRET'];
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing required env var: ${key}`);
+    process.exit(1);
+  }
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// === DATABASE ===
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ Connected to MongoDB'))
+// ────────────────────────────────────────────────
+//  Database
+// ────────────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 5000,
+})
+  .then(() => console.log('✅ MongoDB connected'))
   .catch(err => {
     console.error('❌ MongoDB connection failed:', err.message);
     process.exit(1);
   });
 
-// === USER MODEL ===
+// ────────────────────────────────────────────────
+//  User Model
+// ────────────────────────────────────────────────
 const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  email:    { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
-  name: { type: String, required: true },
-  usage: { type: Number, default: 0 }
-});
+  name:     { type: String, required: true },
+  usage:    { type: Number, default: 0, min: 0 },
+}, { timestamps: true });
 
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
@@ -46,168 +56,186 @@ userSchema.pre('save', async function(next) {
 });
 
 userSchema.methods.comparePassword = async function(candidate) {
-  return await bcrypt.compare(candidate, this.password);
+  return bcrypt.compare(candidate, this.password);
 };
 
 userSchema.virtual('isAdmin').get(function() {
   return this.email === 'theceoion@gmail.com';
 });
 
-userSchema.set('toJSON', { virtuals: true });
 const User = mongoose.model('User', userSchema);
 
-// === MIDDLEWARE (ORDER MATTERS!) ===
+// ────────────────────────────────────────────────
+//  Middleware
+// ────────────────────────────────────────────────
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ✅ SESSION SETUP — MUST COME BEFORE ROUTES
-const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'fallback-dev-secret-change-in-prod',
+// Session
+app.use(session({
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({ 
+  store: MongoStore.create({
     mongoUrl: process.env.MONGODB_URI,
-    collectionName: 'sessions'
+    collectionName: 'sessions',
+    ttl: 7 * 24 * 60 * 60, // 1 week
   }),
-  cookie: { 
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 1 week
+  cookie: {
+    maxAge: 7 * 24 * 60 * 60 * 1000,
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production' // true on Render (HTTPS)
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
   }
-});
+}));
 
-// Handle session errors gracefully
-app.use((req, res, next) => {
-  sessionMiddleware(req, res, (err) => {
-    if (err) {
-      console.error('Session error:', err);
-      return res.status(500).send('Session error');
+// Make user available in templates + req
+app.use(async (req, res, next) => {
+  res.locals.user = null;
+  res.locals.isAdmin = false;
+  res.locals.usage = 0;
+
+  if (req.session.userId) {
+    try {
+      const user = await User.findById(req.session.userId).lean();
+      if (user) {
+        req.user = user;
+        res.locals.user = user;
+        res.locals.isAdmin = user.isAdmin;
+        res.locals.usage = user.usage;
+      } else {
+        req.session.destroy();
+      }
+    } catch (err) {
+      console.error('Session user lookup failed:', err);
+      req.session.destroy();
     }
-    next();
-  });
+  }
+  next();
 });
 
-// ✅ EJS SETUP — NO PHYSICAL VIEWS FOLDER
-app.set('views', '.'); // Prevents "Failed to lookup view" error
-app.set('view engine', 'ejs');
-
-// === EJS TEMPLATES (INLINE) ===
-const ejs = require('ejs');
+// ────────────────────────────────────────────────
+//  Inline EJS Templates
+// ────────────────────────────────────────────────
 const templates = {
-  layout: `
-<!DOCTYPE html>
-<html lang="en">
+  layout: `<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIForge | Admin AI Platform</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIForge • Business + Esports + Support</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
-    :root { --primary: #6c5ce7; }
-    body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
-    .navbar-brand { font-weight: 700; color: var(--primary) !important; }
-    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
-    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
-    .usage-fill { height: 100%; border-radius: 6px; }
-    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
-    .mode-btn { transition: all 0.2s; }
-    .mode-btn.active { background: var(--primary); color: white; }
+    :root { --primary: #6c5ce7; --primary-dark: #5649c0; }
+    body { background: linear-gradient(135deg, #f0f2ff 0%, #e6e9ff 100%); min-height: 100vh; font-family: system-ui, sans-serif; }
+    .navbar-brand { font-weight: 800; color: var(--primary) !important; letter-spacing: -0.5px; }
+    .card { border: none; border-radius: 1.1rem; box-shadow: 0 6px 24px rgba(0,0,0,0.08); overflow: hidden; }
+    .usage-meter { height: 10px; background: #e9ecef; border-radius: 5px; overflow: hidden; }
+    .usage-fill { height: 100%; background: linear-gradient(90deg, #00d084, #00f2c3); transition: width 0.6s ease; }
+    .btn-primary { background: var(--primary); border-color: var(--primary); }
+    .btn-primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+    pre { white-space: pre-wrap; word-break: break-word; background: #1e1e2e !important; color: #c5c8ff; }
   </style>
 </head>
 <body>
-  <nav class="navbar navbar-light bg-white shadow-sm">
-    <div class="container d-flex justify-content-between">
+  <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm">
+    <div class="container">
       <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
-      <div>
-        <% if (locals.user) { %>
-          <span><b><%= user.name %></b> 
+      <div class="ms-auto d-flex align-items-center gap-3">
+        <% if (user) { %>
+          <div class="d-flex align-items-center gap-2">
+            <span><strong><%= user.name %></strong></span>
             <% if (isAdmin) { %>
-              <span class="badge badge-admin text-white">ADMIN</span>
+              <span class="badge bg-gradient text-white px-3 py-2" style="background: linear-gradient(90deg, #6c5ce7, #a29bfe);">ADMIN</span>
             <% } %>
-          </span>
-          <form action="/logout" method="POST" class="d-inline ms-2">
-            <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
+          </div>
+          <form action="/logout" method="POST" class="m-0">
+            <button type="submit" class="btn btn-outline-secondary btn-sm px-3">Logout</button>
           </form>
         <% } else { %>
-          <a href="/login" class="btn btn-primary btn-sm">Login</a>
+          <a href="/login" class="btn btn-primary btn-sm px-4">Login</a>
         <% } %>
       </div>
     </div>
   </nav>
-  <%- body %>
-  <footer class="bg-dark text-light py-3 mt-5">
-    <div class="container text-center">
-      <small>© 2026 AIForge • Only theceoion@gmail.com is admin with $5 free credit</small>
-    </div>
+
+  <main class="flex-grow-1">
+    <%- body %>
+  </main>
+
+  <footer class="bg-dark text-white text-center py-4 mt-5">
+    <small>© 2025–2026 AIForge • Free $5 credit for theceoion@gmail.com only</small>
   </footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 </body>
-</html>
-  `,
-  
-  index: `
-<% const FREE_LIMIT = 5; %>
+</html>`,
+
+  index: `<% const FREE_CREDIT = 5.00; %>
 <div class="container py-5">
   <div class="text-center mb-5">
-    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
-    <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
+    <h1 class="display-4 fw-bold">AIForge</h1>
+    <p class="lead text-muted">Code • Data • Analysis • Stories • Emotional Support</p>
   </div>
 
   <% if (!user) { %>
-    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
+    <div class="alert alert-info text-center shadow-sm">
+      Please <a href="/login" class="alert-link">log in</a> to access the AI.
+    </div>
   <% } else { %>
     <div class="row justify-content-center">
-      <div class="col-md-8">
-        <div class="card p-4">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5>UsageIdashboard</h5>
+      <div class="col-lg-8 col-xl-7">
+        <div class="card p-4 p-md-5">
+          <div class="d-flex justify-content-between align-items-center mb-4">
+            <h4 class="mb-0">AI Dashboard</h4>
             <% if (isAdmin) { %>
-              <span class="badge bg-success">Free Tier: $5</span>
+              <span class="badge bg-success px-3 py-2 fs-6">$<%= FREE_CREDIT %> free credit</span>
             <% } else { %>
-              <span class="badge bg-danger">Paid Plan Required</span>
+              <span class="badge bg-warning text-dark px-3 py-2 fs-6">Paid plan required</span>
             <% } %>
           </div>
 
-          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
+          <p class="mb-2">Total spent: <strong>$<%= usage.toFixed(4) %></strong></p>
 
           <% if (isAdmin) { %>
-            <div class="usage-meter">
-              <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
+            <div class="usage-meter mb-2">
+              <div class="usage-fill" style="width: <%= Math.min(100, (usage / FREE_CREDIT) * 100) %>%"></div>
             </div>
-            <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
+            <small class="text-muted">Remaining: $<%= (FREE_CREDIT - usage).toFixed(4) %></small>
           <% } %>
 
-          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
-            <div class="alert alert-warning mt-3">
+          <% if ((isAdmin && usage >= FREE_CREDIT) || (!isAdmin && usage > 0)) { %>
+            <div class="alert alert-warning mt-4">
               <i class="fas fa-exclamation-triangle me-2"></i>
-              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
+              <%= isAdmin ? 'Free admin credit exhausted ($5)' : 'Non-admin accounts require payment' %>
             </div>
           <% } %>
 
-          <div class="mb-3">
-            <label class="form-label">AI Mode</label>
-            <div class="d-flex flex-wrap gap-2">
-              <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
-              <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
-              <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
-              <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
-              <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
+          <form id="aiForm" class="mt-4">
+            <div class="mb-4">
+              <label class="form-label fw-bold">AI Mode</label>
+              <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
+                <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
+                <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
+                <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
+                <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
+              </div>
+              <input type="hidden" id="mode" name="mode" value="general">
             </div>
-            <input type="hidden" id="modeInput" name="mode" value="general">
-          </div>
 
-          <form id="aiForm" class="mt-3">
-            <div class="mb-3">
-              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
+            <div class="mb-4">
+              <textarea class="form-control" name="prompt" rows="5" placeholder="Your request..." required></textarea>
             </div>
-            <button type="submit" class="btn btn-primary w-100"
-              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
-              <i class="fas fa-bolt me-2"></i> Generate with AI
+
+            <button type="submit" class="btn btn-primary btn-lg w-100" id="submitBtn"
+              <%= (isAdmin && usage >= FREE_CREDIT) || (!isAdmin && usage > 0) ? 'disabled' : '' %>>
+              <i class="fas fa-rocket me-2"></i> Generate
             </button>
           </form>
 
-          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
+          <pre id="result" class="mt-4 p-4 rounded bg-dark text-light" style="display:none; min-height:120px;"></pre>
         </div>
       </div>
     </div>
@@ -219,164 +247,160 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    document.getElementById('modeInput').value = btn.dataset.mode;
+    document.getElementById('mode').value = btn.dataset.mode;
   });
 });
 
-document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
+document.getElementById('aiForm')?.addEventListener('submit', async e => {
   e.preventDefault();
-  const mode = document.getElementById('modeInput').value;
-  const prompt = e.target.prompt.value;
-  
-  const btn = e.submitter;
-  const original = btn.innerHTML;
+  const form = e.target;
+  const btn = document.getElementById('submitBtn');
+  const result = document.getElementById('result');
+
+  const originalText = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Generating...';
 
   try {
     const res = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, mode })
+      body: JSON.stringify({
+        prompt: form.prompt.value.trim(),
+        mode: document.getElementById('mode').value
+      })
     });
+
     const data = await res.json();
-    
-    if (res.ok) {
-      document.getElementById('result').textContent = data.content;
-      document.getElementById('result').style.display = 'block';
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      alert('Error: ' + (data.error || 'Unknown'));
-    }
+
+    if (!res.ok) throw new Error(data.error || 'Generation failed');
+
+    result.textContent = data.content;
+    result.style.display = 'block';
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+
+    // Optional: refresh usage
+    setTimeout(() => location.reload(), 1800);
+
   } catch (err) {
-    alert('Network error: ' + err.message);
+    result.textContent = 'Error: ' + err.message;
+    result.style.display = 'block';
   } finally {
     btn.disabled = false;
-    btn.innerHTML = original;
+    btn.innerHTML = originalText;
   }
 });
-</script>
-  `,
-  
-  login: `
-<div class="container d-flex align-items-center justify-content-center min-vh-100">
-  <div class="col-md-6 col-lg-4">
-    <div class="card p-4 shadow">
-      <h3 class="text-center mb-4">AIForge Login</h3>
-      <% if (locals.error) { %>
-        <div class="alert alert-danger"><%= error %></div>
-      <% } %>
-      <form method="POST">
-        <div class="mb-3">
-          <input type="email" class="form-control" name="email" placeholder="Email" required>
+</script>`,
+
+  login: `<div class="container">
+  <div class="row justify-content-center min-vh-100 align-items-center">
+    <div class="col-md-6 col-lg-5 col-xl-4">
+      <div class="card shadow-lg p-4 p-md-5">
+        <h3 class="text-center mb-4 fw-bold">AIForge Login</h3>
+
+        <% if (error) { %>
+          <div class="alert alert-danger"><%= error %></div>
+        <% } %>
+
+        <form method="POST">
+          <div class="mb-3">
+            <input type="email" name="email" class="form-control form-control-lg" placeholder="Email" required autofocus>
+          </div>
+          <div class="mb-4">
+            <input type="password" name="password" class="form-control form-control-lg" placeholder="Password" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-lg w-100">Sign In</button>
+        </form>
+
+        <div class="text-center mt-4 text-muted small">
+          Admin free tier ($5) → only theceoion@gmail.com
         </div>
-        <div class="mb-3">
-          <input type="password" class="form-control" name="password" placeholder="Password" required>
-        </div>
-        <button type="submit" class="btn btn-primary w-100">Login</button>
-      </form>
-      <div class="text-center mt-3">
-        <small class="text-muted">Only theceoion@gmail.com is admin with $5 free credit</small>
       </div>
     </div>
   </div>
-</div>
-  `
+</div>`
 };
 
-// Custom EJS engine for inline templates
-app.engine('ejs', (filePath, options, callback) => {
-  const templateName = filePath.split('/').pop().replace('.ejs', '');
-  if (templates[templateName]) {
-    try {
-      const body = ejs.render(templates[templateName], options);
-      const html = ejs.render(templates.layout, { ...options, body });
-      callback(null, html);
-    } catch (err) {
-      callback(err);
+// Custom EJS engine for inline templates (this fixes your original error)
+app.engine('ejs', async (filePath, options, callback) => {
+  try {
+    const name = filePath.split(/[\\/]/).pop().replace(/\.ejs$/i, '');
+    if (!templates[name]) {
+      return callback(new Error(`Inline template "${name}" not found`));
     }
-  } else {
-    callback(new Error(`Template not found: ${templateName}`));
+
+    const body = await ejs.render(templates[name], options, { async: true });
+    const html = await ejs.render(templates.layout, { ...options, body }, { async: true });
+
+    callback(null, html);
+  } catch (err) {
+    callback(err);
   }
 });
 
-// === AUTH HELPER ===
-function requireAuth(req, res, next) {
-  // ✅ SAFE CHECK: session might be undefined during errors
-  if (!req.session || !req.session.userId) {
-    return res.redirect('/login');
-  }
-  User.findById(req.session.userId).lean()
-    .then(user => {
-      if (!user) throw new Error('User not found');
-      req.user = user;
-      next();
-    })
-    .catch(() => {
-      req.session.destroy(() => {
-        res.redirect('/login');
-      });
-    });
+app.set('view engine', 'ejs');
+app.set('views', '.');   // required even with custom engine
+
+// ────────────────────────────────────────────────
+//  Helpers
+// ────────────────────────────────────────────────
+function requireLogin(req, res, next) {
+  if (!req.session?.userId) return res.redirect('/login');
+  next();
 }
 
-// === COST & SAFETY ===
 const calculateCost = (promptTokens, completionTokens) => {
-  const inputCost = (promptTokens / 1_000_000) * 2.50;
-  const outputCost = (completionTokens / 1_000_000) * 10.00;
-  return parseFloat((inputCost + outputCost).toFixed(4));
+  // gpt-4o pricing — update if model changes
+  const input  = promptTokens   / 1_000_000 * 2.50;
+  const output = completionTokens / 1_000_000 * 10.00;
+  return Number((input + output).toFixed(4));
 };
 
-const sanitizeInput = (input) => {
-  if (!input || typeof input !== 'string') return '';
-  return validator.escape(input.trim().substring(0, 2000));
-};
+const sanitize = str => validator.escape((str || '').trim()).substring(0, 4000);
 
-const THERAPIST_GUIDELINES = `
-You are a supportive, ethical AI companion. Follow these rules:
-1. NEVER claim to be a licensed therapist or give medical advice
-2. ALWAYS encourage professional help for serious mental health concerns
-3. NEVER engage with self-harm, violence, or illegal content
-4. Respond with empathy, validation, and reflective listening
-5. If user is in crisis, provide resources:
-   - US: Text/Call 988
-   - International: https://www.befrienders.org
+const THERAPIST_SYSTEM = `
+You are a warm, ethical, non-judgmental AI companion — NOT a licensed therapist.
+Rules you MUST follow:
+1. Never give medical, psychiatric or therapeutic advice
+2. Never diagnose or suggest medication
+3. If user mentions self-harm/suicide: respond with empathy + strongly urge 988 (US) or local crisis line
+4. Redirect serious concerns to professionals
+5. Stay supportive, reflective, validating
 `;
 
-// === ROUTES ===
-app.get('/', async (req, res) => {
-  // ✅ SAFE SESSION CHECK
-  let user = null, usage = 0, isAdmin = false;
-  if (req.session && req.session.userId) {
-    try {
-      const u = await User.findById(req.session.userId).lean();
-      if (u) {
-        user = u;
-        usage = u.usage;
-        isAdmin = u.isAdmin;
-      }
-    } catch (err) {
-      // Silently clear bad session
-      req.session.destroy();
-    }
-  }
-  res.render('index', { user, usage, isAdmin });
+// ────────────────────────────────────────────────
+//  Routes
+// ────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.render('index', {
+    user: res.locals.user,
+    isAdmin: res.locals.isAdmin,
+    usage: res.locals.usage || 0
+  });
 });
 
 app.get('/login', (req, res) => {
+  if (req.session.userId) return res.redirect('/');
   res.render('login', { error: null });
 });
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
+  if (!email || !password) {
+    return res.render('login', { error: 'Email and password required' });
+  }
+
   try {
-    const user = await User.findOne({ email: email?.toLowerCase().trim() });
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user || !(await user.comparePassword(password))) {
-      return res.render('login', { error: 'Invalid credentials' });
+      return res.render('login', { error: 'Invalid email or password' });
     }
+
     req.session.userId = user._id.toString();
     res.redirect('/');
   } catch (err) {
-    res.render('login', { error: 'Server error' });
+    console.error(err);
+    res.render('login', { error: 'Something went wrong. Try again.' });
   }
 });
 
@@ -384,92 +408,87 @@ app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/'));
 });
 
-app.post('/api/generate', requireAuth, async (req, res) => {
+app.post('/api/generate', requireLogin, async (req, res) => {
   const { prompt, mode } = req.body;
-  const FREE_TIER_LIMIT = 5.0;
-  const { isAdmin, usage: currentUsage } = req.user;
+  const FREE_LIMIT = 5.00;
 
-  if (!isAdmin && currentUsage > 0) {
-    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
-  }
-  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
-    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
-  }
+  if (!prompt?.trim()) return res.status(400).json({ error: 'Prompt required' });
 
-  const cleanPrompt = sanitizeInput(prompt);
-  if (!cleanPrompt) {
-    return res.status(400).json({ error: 'Invalid prompt' });
+  const { isAdmin, usage } = req.user;
+
+  if (!isAdmin && usage > 0) {
+    return res.status(402).json({ error: 'Non-admin accounts require payment' });
+  }
+  if (isAdmin && usage >= FREE_LIMIT) {
+    return res.status(402).json({ error: 'Admin $5 free credit used up' });
   }
 
-  let systemMessage = "You are a helpful, professional AI assistant.";
-  if (mode === 'therapist') {
-    systemMessage = THERAPIST_GUIDELINES;
-  } else if (mode === 'code') {
-    systemMessage = "You are a senior software engineer. Generate secure, efficient, well-documented code.";
-  } else if (mode === 'data') {
-    systemMessage = "Generate high-quality synthetic training data in JSON format with realistic distributions.";
-  }
+  let system = "You are a highly capable, precise AI assistant.";
+  if (mode === 'therapist') system = THERAPIST_SYSTEM;
+  if (mode === 'code')      system = "You are a senior software engineer. Write clean, secure, well-commented code.";
+  if (mode === 'data')      system = "You are a data scientist. Generate realistic synthetic datasets in clean JSON.";
 
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        { role: "system", content: systemMessage },
-        { role: "user", content: cleanPrompt }
+        { role: "system", content: system },
+        { role: "user",   content: sanitize(prompt) }
       ],
-      temperature: mode === 'therapist' ? 0.8 : 0.7,
-      max_tokens: 1000
+      temperature: mode === 'therapist' ? 0.85 : 0.7,
+      max_tokens: 1600
     });
 
+    const choice = completion.choices[0];
     const cost = calculateCost(
       completion.usage.prompt_tokens,
       completion.usage.completion_tokens
     );
-    
-    const newUsage = req.user.usage + cost;
-    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
+
+    const newUsage = Number((usage + cost).toFixed(4));
+    await User.findByIdAndUpdate(req.user._id, { $set: { usage: newUsage } });
 
     res.json({
       success: true,
-      content: completion.choices[0].message.content,
-      cost: parseFloat(cost.toFixed(4)),
-      newUsage: parseFloat(newUsage.toFixed(4))
+      content: choice.message.content,
+      cost,
+      newUsage
     });
 
-  } catch (error) {
-    console.error('OpenAI Error:', error.message);
-    res.status(500).json({ 
-      error: 'AI generation failed',
-      details: error.type === 'insufficient_quota' ? 'API quota exceeded' : 'Processing error'
-    });
+  } catch (err) {
+    console.error('OpenAI error:', err);
+    const msg = err?.code === 'insufficient_quota' ? 'OpenAI quota exceeded' : 'AI generation failed';
+    res.status(500).json({ error: msg });
   }
 });
 
-// === START SERVER ===
+// ────────────────────────────────────────────────
+//  Admin Bootstrap + Server Start
+// ────────────────────────────────────────────────
 const server = app.listen(PORT, async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  
-  // Create admin account
+  console.log(`🚀 AIForge running → http://localhost:${PORT}`);
+
+  // Create admin if missing
   try {
     const adminEmail = 'theceoion@gmail.com';
-    const existing = await User.exists({ email: adminEmail });
-    if (!existing) {
+    if (!await User.exists({ email: adminEmail })) {
       await new User({
         email: adminEmail,
-        password: 'SecurePass123!', // ⚠️ CHANGE IN PRODUCTION!
-        name: 'CEO'
+        password: 'ChangeMeSecure123!!', // ← CHANGE THIS or use one-time setup script
+        name: 'Admin'
       }).save();
-      console.log('✅ Created admin account:', adminEmail);
+      console.log(`Admin account created: ${adminEmail}`);
     }
   } catch (err) {
-    console.error('Admin creation failed:', err.message);
+    console.error('Admin bootstrap failed:', err.message);
   }
 });
 
-// Graceful shutdown
+// Graceful shutdown (important on Render)
 process.on('SIGTERM', () => {
+  console.log('SIGTERM received → shutting down');
   server.close(() => {
-    console.log('🔄 Server shut down gracefully');
+    console.log('Server closed');
     process.exit(0);
   });
 });
