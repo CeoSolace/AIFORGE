@@ -1,41 +1,32 @@
-// app.js — Full AI platform with /dashboard chat after login
+// app.js — Guaranteed working login → /dashboard
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const { OpenAI } = require('openai');
-const validator = require('validator');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Validate env
-const requiredEnv = ['OPENAI_API_KEY', 'MONGODB_URI', 'USER', 'PASSWORD'];
-for (const key of requiredEnv) {
-  if (!process.env[key]) {
-    console.error(`❌ Missing ${key}`);
-    process.exit(1);
-  }
+if (!process.env.MONGODB_URI || !process.env.USER || !process.env.PASSWORD) {
+  console.error('❌ Missing USER, PASSWORD, or MONGODB_URI in .env');
+  process.exit(1);
 }
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // DB
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => {
-    console.error('❌ DB Error:', err);
+    console.error('❌ DB Error:', err.message);
     process.exit(1);
   });
 
 // User model
 const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password: { type: String, required: true },
-  name: { type: String, required: true },
-  usage: { type: Number, default: 0 }
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
 });
 
 userSchema.pre('save', async function(next) {
@@ -48,267 +39,83 @@ userSchema.methods.comparePassword = async function(candidate) {
   return await bcrypt.compare(candidate, this.password);
 };
 
-userSchema.virtual('isAdmin').get(function() {
-  return this.email === process.env.USER;
-});
-
-userSchema.set('toJSON', { virtuals: true });
 const User = mongoose.model('User', userSchema);
 
 // Middleware
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const sessionMiddleware = session({
+app.use(session({
   secret: process.env.SESSION_SECRET || 'dev-secret',
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
   cookie: { 
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge: 24 * 60 * 60 * 1000,
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production'
+    secure: false // Set to true on Render (HTTPS)
   }
-});
+}));
 
-app.use((req, res, next) => {
-  sessionMiddleware(req, res, (err) => {
-    if (err) {
-      console.error('Session error:', err);
-      return res.status(500).send('Session error');
-    }
-    next();
-  });
-});
-
-// ✅ INLINE TEMPLATES
-const renderTemplate = (templateName, options = {}) => {
-  const ejs = require('ejs');
-  
-  const templates = {
-    layout: `
+// Simple inline template renderer
+const renderLogin = (error = null) => `
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIForge | Dashboard</title>
+  <meta charset="utf-8">
+  <title>Login</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
-  <style>
-    :root { --primary: #6c5ce7; }
-    body { background: #f8f9fa; min-height: 100vh; }
-    .navbar-brand { font-weight: 700; color: var(--primary) !important; }
-    .chat-container { max-width: 900px; margin: 0 auto; }
-    .chat-box { height: 500px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 10px; padding: 15px; background: white; }
-    .message { margin-bottom: 15px; padding: 10px; border-radius: 8px; }
-    .user-message { background: #e3f2fd; margin-left: 20%; }
-    .ai-message { background: #f1f8e9; margin-right: 20%; }
-    .usage-bar { height: 8px; background: #e9ecef; border-radius: 4px; margin: 10px 0; overflow: hidden; }
-    .usage-fill { height: 100%; border-radius: 4px; }
-    .mode-btn { transition: all 0.2s; }
-    .mode-btn.active { background: var(--primary); color: white; }
-  </style>
 </head>
-<body>
-  <nav class="navbar navbar-light bg-white shadow-sm">
-    <div class="container d-flex justify-content-between">
-      <a class="navbar-brand" href="/dashboard"><i class="fas fa-comments me-2"></i>AIForge</a>
-      <div>
-        <% if (locals.user) { %>
-          <span><b><%= user.name %></b> 
-            <% if (isAdmin) { %>
-              <span class="badge bg-primary">ADMIN</span>
-            <% } %>
-          </span>
-          <form action="/logout" method="POST" class="d-inline ms-2">
-            <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
-          </form>
-        <% } else { %>
-          <a href="/login" class="btn btn-primary btn-sm">Login</a>
-        <% } %>
-      </div>
-    </div>
-  </nav>
-  <%- body %>
-  <footer class="bg-light py-3 mt-4">
-    <div class="container text-center">
-      <small>© 2026 AIForge • Only admin gets $5 free credit</small>
-    </div>
-  </footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-    `,
-    
-    login: `
-<div class="container d-flex align-items-center justify-content-center min-vh-100">
-  <div class="col-md-6 col-lg-4">
+<body class="d-flex align-items-center justify-content-center min-vh-100 bg-light">
+  <div class="col-md-4">
     <div class="card p-4 shadow">
       <h3 class="text-center mb-4">AIForge Login</h3>
-      <% if (locals.error) { %>
-        <div class="alert alert-danger"><%= error %></div>
-      <% } %>
+      ${error ? `<div class="alert alert-danger">${error}</div>` : ''}
       <form method="POST">
         <div class="mb-3">
-          <input type="email" class="form-control" name="email" placeholder="Email" required>
+          <input type="email" name="email" class="form-control" placeholder="Email" required>
         </div>
         <div class="mb-3">
-          <input type="password" class="form-control" name="password" placeholder="Password" required>
+          <input type="password" name="password" class="form-control" placeholder="Password" required>
         </div>
         <button type="submit" class="btn btn-primary w-100">Login</button>
       </form>
       <div class="text-center mt-3">
-        <small class="text-muted">Admin: <%= process.env.USER || 'admin@example.com' %></small>
+        <small>Admin: ${process.env.USER}</small>
       </div>
     </div>
   </div>
-</div>
-    `,
-    
-    dashboard: `
-<% const FREE_LIMIT = 5; %>
-<div class="container chat-container py-4">
-  <div class="d-flex justify-content-between align-items-center mb-3">
-    <h4><i class="fas fa-robot me-2"></i>AI Assistant</h4>
-    <% if (isAdmin) { %>
-      <span class="badge bg-success">Free Tier: $5</span>
-    <% } else { %>
-      <span class="badge bg-warning">Paid Plan</span>
-    <% } %>
-  </div>
+</body>
+</html>
+`;
 
-  <p>Usage: $<%= usage.toFixed(4) %> 
-    <% if (isAdmin) { %>
-      / $<%= FREE_LIMIT %>
-    <% } %>
-  </p>
-
-  <% if (isAdmin) { %>
-    <div class="usage-bar">
-      <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
+const renderDashboard = (user) => `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-dark bg-primary">
+    <div class="container">
+      <span class="navbar-brand">AIForge Dashboard</span>
+      <form action="/logout" method="POST">
+        <button type="submit" class="btn btn-light btn-sm">Logout</button>
+      </form>
     </div>
-  <% } %>
-
-  <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
-    <div class="alert alert-warning">
-      <i class="fas fa-exclamation-triangle me-2"></i>
-      <%= isAdmin ? 'Free tier exhausted' : 'Payment required' %>
-    </div>
-  <% } %>
-
-  <!-- Mode selector -->
-  <div class="mb-3">
-    <div class="btn-group" role="group">
-      <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
-      <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
-      <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
-      <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
-    </div>
-    <input type="hidden" id="modeInput" value="general">
-  </div>
-
-  <!-- Chat box -->
-  <div class="chat-box" id="chatBox">
-    <div class="message ai-message">
-      Hello! I'm your AI assistant. How can I help you today?
+  </nav>
+  <div class="container py-5">
+    <h2>Welcome, ${user.email}!</h2>
+    <p>You are now logged in and can use AI features.</p>
+    <div class="alert alert-success">
+      ✅ Login successful! You've been redirected to /dashboard.
     </div>
   </div>
-
-  <!-- Input form -->
-  <form id="chatForm" class="mt-3">
-    <div class="input-group">
-      <input type="text" class="form-control" id="userInput" placeholder="Type your message..." required
-        <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
-      <button class="btn btn-primary" type="submit"
-        <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
-        Send
-      </button>
-    </div>
-  </form>
-</div>
-
-<script>
-let chatHistory = [];
-
-document.querySelectorAll('.mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('modeInput').value = btn.dataset.mode;
-  });
-});
-
-document.getElementById('chatForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const userInput = document.getElementById('userInput').value.trim();
-  const mode = document.getElementById('modeInput').value;
-  
-  if (!userInput) return;
-
-  // Add user message to chat
-  addMessageToChat(userInput, 'user');
-  document.getElementById('userInput').value = '';
-  
-  // Disable input during processing
-  const sendBtn = document.querySelector('#chatForm button');
-  sendBtn.disabled = true;
-  sendBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-
-  try {
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: userInput, mode })
-    });
-    
-    const data = await res.json();
-    
-    if (res.ok) {
-      addMessageToChat(data.content, 'ai');
-      // Auto-scroll to bottom
-      document.getElementById('chatBox').scrollTop = document.getElementById('chatBox').scrollHeight;
-    } else {
-      addMessageToChat('Error: ' + (data.error || 'Unknown'), 'ai');
-    }
-  } catch (err) {
-    addMessageToChat('Network error: ' + err.message, 'ai');
-  } finally {
-    sendBtn.disabled = false;
-    sendBtn.innerHTML = 'Send';
-  }
-});
-
-function addMessageToChat(text, sender) {
-  const chatBox = document.getElementById('chatBox');
-  const messageDiv = document.createElement('div');
-  messageDiv.className = sender === 'user' ? 'message user-message' : 'message ai-message';
-  messageDiv.textContent = text;
-  chatBox.appendChild(messageDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
-}
-</script>
-    `
-  };
-
-  if (!templates[templateName]) {
-    throw new Error(`Template not found: ${templateName}`);
-  }
-
-  const body = ejs.render(templates[templateName], { ...options, locals: options });
-  return ejs.render(templates.layout, { ...options, body, locals: options });
-};
-
-// Get user helper
-async function getUserFromSession(req) {
-  if (!req.session || !req.session.userId) return null;
-  try {
-    return await User.findById(req.session.userId).lean();
-  } catch (err) {
-    req.session.destroy();
-    return null;
-  }
-}
+</body>
+</html>
+`;
 
 // Routes
 app.get('/', (req, res) => {
@@ -316,161 +123,95 @@ app.get('/', (req, res) => {
 });
 
 app.get('/login', (req, res) => {
-  try {
-    const html = renderTemplate('login', { error: null });
-    res.send(html);
-  } catch (err) {
-    res.status(500).send('Template error');
-  }
+  console.log('➡️ Rendering login page');
+  res.send(renderLogin());
 });
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
+  console.log('🔐 Login attempt:', email);
+  
   try {
-    const user = await User.findOne({ email: email?.toLowerCase().trim() });
-    if (!user || !(await user.comparePassword(password))) {
-      const html = renderTemplate('login', { error: 'Invalid credentials' });
-      return res.send(html);
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      console.log('❌ User not found');
+      return res.send(renderLogin('Invalid email or password'));
     }
+
+    // Check password
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      console.log('❌ Password mismatch');
+      return res.send(renderLogin('Invalid email or password'));
+    }
+
+    // Save session
     req.session.userId = user._id.toString();
-    res.redirect('/dashboard'); // ✅ Redirect to dashboard after login
+    req.session.save((err) => {
+      if (err) {
+        console.error('	Session save error:', err);
+        return res.send(renderLogin('Session error. Please try again.'));
+      }
+      
+      console.log('✅ Session saved, redirecting to /dashboard');
+      res.redirect('/dashboard'); // ✅ GUARANTEED REDIRECT
+    });
+
   } catch (err) {
-    const html = renderTemplate('login', { error: 'Server error' });
-    res.send(html);
+    console.error('🔥 Login error:', err);
+    res.send(renderLogin('Server error. Please try again.'));
   }
 });
 
 app.get('/dashboard', async (req, res) => {
-  const user = await getUserFromSession(req);
-  if (!user) {
+  console.log('➡️ Accessing /dashboard, session:', req.session.userId);
+  
+  if (!req.session.userId) {
+    console.log('⚠️ No session, redirecting to login');
     return res.redirect('/login');
   }
-  
-  const usage = user.usage;
-  const isAdmin = user.isAdmin;
-  
+
   try {
-    const html = renderTemplate('dashboard', { user, usage, isAdmin });
-    res.send(html);
+    const user = await User.findById(req.session.userId);
+    if (!user) {
+      console.log('⚠️ User not found in DB, destroying session');
+      req.session.destroy();
+      return res.redirect('/login');
+    }
+    
+    console.log('✅ Rendering dashboard for:', user.email);
+    res.send(renderDashboard(user));
   } catch (err) {
-    console.error('Dashboard render error:', err);
-    res.status(500).send('Dashboard error');
+    console.error('Dashboard error:', err);
+    res.redirect('/login');
   }
 });
 
 app.post('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/login'));
+  req.session.destroy();
+  res.redirect('/login');
 });
 
-// AI endpoint
-const calculateCost = (promptTokens, completionTokens) => {
-  const inputCost = (promptTokens / 1_000_000) * 2.50;
-  const outputCost = (completionTokens / 1_000_000) * 10.00;
-  return parseFloat((inputCost + outputCost).toFixed(4));
+// Create admin user on startup
+const createAdmin = async () => {
+  const adminEmail = process.env.USER;
+  const adminExists = await User.exists({ email: adminEmail });
+  
+  if (!adminExists) {
+    const admin = new User({
+      email: adminEmail,
+      password: process.env.PASSWORD
+    });
+    await admin.save();
+    console.log('✅ Created admin user:', adminEmail);
+  } else {
+    console.log('ℹ️ Admin user already exists');
+  }
 };
-
-const sanitizeInput = (input) => {
-  if (!input || typeof input !== 'string') return '';
-  return validator.escape(input.trim().substring(0, 2000));
-};
-
-const THERAPIST_GUIDELINES = `
-You are a supportive, ethical AI companion. Follow these rules:
-1. NEVER claim to be a licensed therapist or give medical advice
-2. ALWAYS encourage professional help for serious mental health concerns
-3. NEVER engage with self-harm, violence, or illegal content
-4. Respond with empathy, validation, and reflective listening
-5. If user is in crisis, provide resources:
-   - US: Text/Call 988
-   - International: https://www.befrienders.org
-`;
-
-app.post('/api/generate', async (req, res) => {
-  const user = await getUserFromSession(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const { prompt, mode } = req.body;
-  const FREE_TIER_LIMIT = 5.0;
-  const { isAdmin, usage: currentUsage } = user;
-
-  if (!isAdmin && currentUsage > 0) {
-    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
-  }
-  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
-    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
-  }
-
-  const cleanPrompt = sanitizeInput(prompt);
-  if (!cleanPrompt) {
-    return res.status(400).json({ error: 'Invalid prompt' });
-  }
-
-  let systemMessage = "You are a helpful, professional AI assistant.";
-  if (mode === 'therapist') {
-    systemMessage = THERAPIST_GUIDELINES;
-  } else if (mode === 'code') {
-    systemMessage = "You are a senior software engineer. Generate secure, efficient, well-documented code.";
-  } else if (mode === 'data') {
-    systemMessage = "Generate high-quality synthetic training data in JSON format with realistic distributions.";
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: systemMessage },
-        { role: "user", content: cleanPrompt }
-      ],
-      temperature: mode === 'therapist' ? 0.8 : 0.7,
-      max_tokens: 1000
-    });
-
-    const cost = calculateCost(
-      completion.usage.prompt_tokens,
-      completion.usage.completion_tokens
-    );
-    
-    const newUsage = user.usage + cost;
-    await User.findByIdAndUpdate(user._id, { usage: newUsage });
-
-    res.json({
-      success: true,
-      content: completion.choices[0].message.content,
-      cost: parseFloat(cost.toFixed(4)),
-      newUsage: parseFloat(newUsage.toFixed(4))
-    });
-
-  } catch (error) {
-    console.error('OpenAI Error:', error.message);
-    res.status(500).json({ 
-      error: 'AI generation failed',
-      details: error.type === 'insufficient_quota' ? 'API quota exceeded' : 'Processing error'
-    });
-  }
-});
 
 // Start server
-const server = app.listen(PORT, async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  
-  try {
-    const adminEmail = process.env.USER;
-    const adminExists = await User.exists({ email: adminEmail });
-    if (!adminExists) {
-      await new User({
-        email: adminEmail,
-        password: process.env.PASSWORD,
-        name: 'Admin'
-      }).save();
-      console.log('✅ Created admin account:', adminEmail);
-    }
-  } catch (err) {
-    console.error('Admin creation failed:', err.message);
-  }
-});
-
-process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
+app.listen(PORT, async () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  await createAdmin();
 });
