@@ -1,11 +1,8 @@
 {
   "name": "ai-forge",
   "version": "1.0.0",
-  "description": "AI-powered business/esports assistant with usage tracking",
-  "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
+    "start": "node app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -15,8 +12,5 @@
     "express": "^4.19.2",
     "express-session": "^1.18.0",
     "mongoose": "^8.4.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.4"
   }
 }
