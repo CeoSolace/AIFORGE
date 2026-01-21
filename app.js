@@ -1,4 +1,4 @@
-// app.js — AI Platform: Admin ($5 free), Unlimited Prompts, Therapist Mode, Safety
+// app.js — Full AI Platform: Admin ($5 free), Therapist Mode, Inline EJS, Fixed View Error
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -55,15 +55,10 @@ const User = mongoose.model('User', userSchema);
 // === MIDDLEWARE ===
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.set('view engine', 'ejs');
 
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-in-prod',
-  resave: false,
-  saveUninitialized: false,
-  store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 }
-}));
+// ✅ FIX FOR "Failed to lookup view" ERROR
+app.set('views', '.'); // Trick Express into not requiring a views folder
+app.set('view engine', 'ejs');
 
 // === AUTH GUARD ===
 function requireAuth(req, res, next) {
@@ -90,134 +85,22 @@ const calculateCost = (promptTokens, completionTokens) => {
 // === SAFE PROMPT HANDLING ===
 const sanitizeInput = (input) => {
   if (!input || typeof input !== 'string') return '';
-  // Remove dangerous characters but preserve meaning
   return validator.escape(input.trim().substring(0, 2000));
 };
 
 // === THERAPIST SAFETY PROTOCOLS ===
 const THERAPIST_GUIDELINES = `
-You are a supportive, ethical AI therapist. Follow these rules:
-1. NEVER give medical advice or diagnose conditions
-2. ALWAYS encourage professional help for serious issues
+You are a supportive, ethical AI companion. Follow these rules:
+1. NEVER claim to be a licensed therapist or give medical advice
+2. ALWAYS encourage professional help for serious mental health concerns
 3. NEVER engage with self-harm, violence, or illegal content
 4. Respond with empathy, validation, and reflective listening
-5. If user is in crisis, provide hotlines: 
-   - US: 988 Suicide & Crisis Lifeline
-   - Global: https://www.befrienders.org
+5. If user is in crisis, provide resources:
+   - US: Text/Call 988
+   - International: https://www.befrienders.org
 `;
 
-// === ROUTES ===
-app.get('/', async (req, res) => {
-  let user = null, usage = 0, isAdmin = false;
-  if (req.session.userId) {
-    try {
-      const u = await User.findById(req.session.userId).lean();
-      if (u) ({ usage, isAdmin } = u);
-      user = u;
-    } catch (err) {
-      req.session.destroy();
-    }
-  }
-  res.render('index', { user, usage, isAdmin });
-});
-
-app.get('/login', (req, res) => res.render('login', { error: null }));
-
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const user = await User.findOne({ email: email?.toLowerCase().trim() });
-    if (!user || !(await user.comparePassword(password))) {
-      return res.render('login', { error: 'Invalid credentials' });
-    }
-    req.session.userId = user._id.toString();
-    res.redirect('/');
-  } catch (err) {
-    res.render('login', { error: 'Server error' });
-  }
-});
-
-app.post('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/'));
-});
-
-// === AI GENERATION ENDPOINT ===
-app.post('/api/generate', requireAuth, async (req, res) => {
-  const { prompt, mode } = req.body;
-  const FREE_TIER_LIMIT = 5.0;
-  const { isAdmin, usage: currentUsage } = req.user;
-
-  // 🔒 Payment enforcement
-  if (!isAdmin && currentUsage > 0) {
-    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
-  }
-  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
-    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
-  }
-
-  // 🛡️ Input sanitization
-  const cleanPrompt = sanitizeInput(prompt);
-  if (!cleanPrompt) {
-    return res.status(400).json({ error: 'Invalid prompt' });
-  }
-
-  // Build system message based on mode
-  let systemMessage = "You are a helpful, professional AI assistant.";
-  
-  if (mode === 'therapist') {
-    systemMessage = THERAPIST_GUIDELINES;
-  } else if (mode === 'custom') {
-    // For custom modes, we only allow safe predefined templates
-    // In production, you could fetch from a DB of approved prompts
-    systemMessage = "You are an expert AI assistant. Provide accurate, helpful, and safe responses.";
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: systemMessage },
-        { role: "user", content: cleanPrompt }
-      ],
-      temperature: mode === 'therapist' ? 0.8 : 0.7,
-      max_tokens: 1000,
-      // Safety moderation (OpenAI does this by default, but we add extra layer)
-      presence_penalty: 0.5,
-      frequency_penalty: 0.5
-    });
-
-    const cost = calculateCost(
-      completion.usage.prompt_tokens,
-      completion.usage.completion_tokens
-    );
-    
-    const newUsage = req.user.usage + cost;
-    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
-
-    // 🛡️ Post-generation safety check (basic)
-    const content = completion.choices[0].message.content;
-    if (content.toLowerCase().includes('i am not a therapist') || 
-        content.toLowerCase().includes('seek professional help')) {
-      // Allow therapeutic disclaimers
-    }
-
-    res.json({
-      success: true,
-      content: content,
-      cost: parseFloat(cost.toFixed(4)),
-      newUsage: parseFloat(newUsage.toFixed(4))
-    });
-
-  } catch (error) {
-    console.error('OpenAI Error:', error.message);
-    res.status(500).json({ 
-      error: 'AI generation failed', 
-      details: error.type === 'insufficient_quota' ? 'API quota exceeded' : 'Processing error'
-    });
-  }
-});
-
-// === EJS TEMPLATES ===
+// === EJS INLINE TEMPLATES ===
 const ejs = require('ejs');
 const templates = {
   layout: `
@@ -276,7 +159,7 @@ const templates = {
 <% const FREE_LIMIT = 5; %>
 <div class="container py-5">
   <div class="text-center mb-5">
-    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Therapy</h1>
+    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
     <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
   </div>
 
@@ -413,26 +296,138 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   `
 };
 
-app.engine('ejs', (path, opts, cb) => {
-  const name = path.split('/').pop().replace('.ejs', '');
-  if (templates[name]) {
-    const body = ejs.render(templates[name], opts);
-    const html = ejs.render(templates.layout, { ...opts, body });
-    cb(null, html);
-  } else cb(new Error('Template not found'));
+// ✅ CUSTOM EJS ENGINE FOR INLINE TEMPLATES
+app.engine('ejs', (filePath, options, callback) => {
+  // Extract template name from path (e.g., '/index.ejs' → 'index')
+  const templateName = filePath.split('/').pop().replace('.ejs', '');
+  
+  if (templates[templateName]) {
+    try {
+      const body = ejs.render(templates[templateName], options);
+      const html = ejs.render(templates.layout, { ...options, body });
+      callback(null, html);
+    } catch (err) {
+      callback(err);
+    }
+  } else {
+    callback(new Error(`Template not found: ${templateName}`));
+  }
+});
+
+// === ROUTES ===
+app.get('/', async (req, res) => {
+  let user = null, usage = 0, isAdmin = false;
+  if (req.session.userId) {
+    try {
+      const u = await User.findById(req.session.userId).lean();
+      if (u) ({ usage, isAdmin } = u);
+      user = u;
+    } catch (err) {
+      req.session.destroy();
+    }
+  }
+  res.render('index', { user, usage, isAdmin });
+});
+
+app.get('/login', (req, res) => res.render('login', { error: null }));
+
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email: email?.toLowerCase().trim() });
+    if (!user || !(await user.comparePassword(password))) {
+      return res.render('login', { error: 'Invalid credentials' });
+    }
+    req.session.userId = user._id.toString();
+    res.redirect('/');
+  } catch (err) {
+    res.render('login', { error: 'Server error' });
+  }
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/'));
+});
+
+// === AI GENERATION ENDPOINT ===
+app.post('/api/generate', requireAuth, async (req, res) => {
+  const { prompt, mode } = req.body;
+  const FREE_TIER_LIMIT = 5.0;
+  const { isAdmin, usage: currentUsage } = req.user;
+
+  // 🔒 Payment enforcement
+  if (!isAdmin && currentUsage > 0) {
+    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
+  }
+  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
+    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
+  }
+
+  // 🛡️ Input sanitization
+  const cleanPrompt = sanitizeInput(prompt);
+  if (!cleanPrompt) {
+    return res.status(400).json({ error: 'Invalid prompt' });
+  }
+
+  // Build system message
+  let systemMessage = "You are a helpful, professional AI assistant.";
+  if (mode === 'therapist') {
+    systemMessage = THERAPIST_GUIDELINES;
+  } else if (mode === 'code') {
+    systemMessage = "You are a senior software engineer. Generate secure, efficient, well-documented code.";
+  } else if (mode === 'data') {
+    systemMessage = "Generate high-quality synthetic training data in JSON format with realistic distributions.";
+  }
+  // 'general' and 'custom' use default
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: systemMessage },
+        { role: "user", content: cleanPrompt }
+      ],
+      temperature: mode === 'therapist' ? 0.8 : 0.7,
+      max_tokens: 1000,
+      presence_penalty: 0.5,
+      frequency_penalty: 0.5
+    });
+
+    const cost = calculateCost(
+      completion.usage.prompt_tokens,
+      completion.usage.completion_tokens
+    );
+    
+    const newUsage = req.user.usage + cost;
+    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
+
+    res.json({
+      success: true,
+      content: completion.choices[0].message.content,
+      cost: parseFloat(cost.toFixed(4)),
+      newUsage: parseFloat(newUsage.toFixed(4))
+    });
+
+  } catch (error) {
+    console.error('OpenAI Error:', error.message);
+    res.status(500).json({ 
+      error: 'AI generation failed',
+      details: error.type === 'insufficient_quota' ? 'API quota exceeded' : 'Processing error'
+    });
+  }
 });
 
 // === START SERVER ===
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   
-  // Create admin
+  // Create admin account
   const adminEmail = 'theceoion@gmail.com';
   const existing = await User.exists({ email: adminEmail });
   if (!existing) {
     await new User({
       email: adminEmail,
-      password: 'CuntFucker26!', // ⚠️ CHANGE IN PRODUCTION!
+      password: 'CuntFuck26!', // ⚠️ CHANGE IN PRODUCTION!
       name: 'CEO'
     }).save();
     console.log('✅ Created admin account:', adminEmail);
