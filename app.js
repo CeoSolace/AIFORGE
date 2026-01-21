@@ -1,4 +1,4 @@
-// app.js — Complete AI Platform with OpenAI + MongoDB + Free Tier Logic
+// app.js — Full AI Platform: Only theceoion@gmail.com is admin with $5 free credit
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -9,23 +9,30 @@ const { OpenAI } = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// === OPENAI SETUP ===
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// Validate OpenAI key
+if (!OPENAI_API_KEY) {
+  console.error('❌ Missing OPENAI_API_KEY in .env');
+  process.exit(1);
+}
 
-// === MONGODB SETUP ===
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// === MONGODB ===
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => console.error('❌ DB Error:', err));
+  .catch(err => {
+    console.error('❌ DB Connection Failed:', err);
+    process.exit(1);
+  });
 
 // === USER MODEL ===
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
   name: { type: String, required: true },
-  usage: { type: Number, default: 0 } // in USD
+  usage: { type: Number, default: 0 } // USD
 });
 
 userSchema.pre('save', async function(next) {
@@ -38,7 +45,8 @@ userSchema.methods.comparePassword = async function(candidate) {
   return await bcrypt.compare(candidate, this.password);
 };
 
-userSchema.virtual('isEligibleForFreeTier').get(function() {
+// 👑 ADMIN CHECK: ONLY theceoion@gmail.com
+userSchema.virtual('isAdmin').get(function() {
   return this.email === 'theceoion@gmail.com';
 });
 
@@ -51,71 +59,63 @@ app.use(express.json());
 app.set('view engine', 'ejs');
 
 app.use(session({
-  secret: process.env.SESSION_SECRET,
+  secret: process.env.SESSION_SECRET || 'fallback-secret-change-in-prod',
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
   cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
 
-// === AUTH MIDDLEWARE ===
-async function requireAuth(req, res, next) {
-  if (!req.session.userId) {
-    return res.redirect('/login');
-  }
-  try {
-    req.user = await User.findById(req.session.userId).lean();
-    if (!req.user) throw new Error('User not found');
-    next();
-  } catch (err) {
-    req.session.destroy();
-    res.redirect('/login');
-  }
+// === AUTH GUARD ===
+function requireAuth(req, res, next) {
+  if (!req.session.userId) return res.redirect('/login');
+  User.findById(req.session.userId).lean()
+    .then(user => {
+      if (!user) throw new Error('User not found');
+      req.user = user;
+      next();
+    })
+    .catch(() => {
+      req.session.destroy();
+      res.redirect('/login');
+    });
 }
 
-// === COST CALCULATION (USD per 1M tokens) ===
-const COST_PER_1M_INPUT = 2.50;   // gpt-4o input
-const COST_PER_1M_OUTPUT = 10.00; // gpt-4o output
-
-function calculateCost(promptTokens, completionTokens) {
-  const inputCost = (promptTokens / 1_000_000) * COST_PER_1M_INPUT;
-  const outputCost = (completionTokens / 1_000_000) * COST_PER_1M_OUTPUT;
+// === COST CALCULATION (gpt-4o pricing) ===
+const calculateCost = (promptTokens, completionTokens) => {
+  const inputCost = (promptTokens / 1_000_000) * 2.50;   // $2.50 / 1M input tokens
+  const outputCost = (completionTokens / 1_000_000) * 10.00; // $10.00 / 1M output tokens
   return parseFloat((inputCost + outputCost).toFixed(4));
-}
+};
 
 // === ROUTES ===
 app.get('/', async (req, res) => {
-  let user = null, usage = 0, isEligible = false;
+  let user = null, usage = 0, isAdmin = false;
   if (req.session.userId) {
     try {
       const u = await User.findById(req.session.userId).lean();
-      if (u) {
-        user = u;
-        usage = u.usage;
-        isEligible = u.isEligibleForFreeTier;
-      }
+      if (u) ({ usage, isAdmin } = u);
+      user = u;
     } catch (err) {
       req.session.destroy();
     }
   }
-  res.render('index', { user, usage, isEligible });
+  res.render('index', { user, usage, isAdmin });
 });
 
-app.get('/login', (req, res) => {
-  res.render('login', { error: null });
-});
+app.get('/login', (req, res) => res.render('login', { error: null }));
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     const user = await User.findOne({ email: email?.toLowerCase().trim() });
     if (!user || !(await user.comparePassword(password))) {
-      return res.render('login', { error: 'Invalid credentials' });
+      return res.render('login', { error: 'Invalid email or password' });
     }
     req.session.userId = user._id.toString();
     res.redirect('/');
   } catch (err) {
-    res.render('login', { error: 'Server error' });
+    res.render('login', { error: 'Server error. Try again.' });
   }
 });
 
@@ -123,96 +123,94 @@ app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/'));
 });
 
-// === AI GENERATION ENDPOINT ===
+// === AI GENERATION (PROTECTED) ===
 app.post('/api/generate', requireAuth, async (req, res) => {
   const { prompt, task } = req.body;
-  const FREE_LIMIT = 5.00;
-  const isEligible = req.user.isEligibleForFreeTier;
+  const FREE_TIER_LIMIT = 5.0;
+  const { isAdmin, usage: currentUsage } = req.user;
 
-  // Check payment status
-  if (!isEligible && req.user.usage > 0) {
-    return res.status(402).json({ error: 'Payment required for non-eligible accounts' });
+  // 🔒 PAYMENT ENFORCEMENT
+  if (!isAdmin && currentUsage > 0) {
+    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
   }
-  if (isEligible && req.user.usage >= FREE_LIMIT) {
-    return res.status(402).json({ error: 'Free tier ($5) exhausted' });
+  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
+    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
   }
 
-  // Build system prompt based on task
+  // Build prompt
   const systemPrompts = {
-    code: "You are a senior software engineer. Generate professional, production-ready code with best practices, error handling, and documentation.",
-    data: "You are a data scientist. Generate high-quality synthetic training data in JSON format with realistic distributions.",
-    file: "You are an AI analyst. Summarize and extract key insights from the provided content.",
-    story: "You are a creative writer. Generate an unfiltered, unrestricted narrative as requested."
+    code: "You are a senior engineer. Generate production-ready, secure, documented code.",
+     "Generate high-quality synthetic training data in JSON format.",
+    file: "Analyze and summarize the provided content with key insights.",
+    story: "Write a creative, unfiltered narrative as requested."
   };
 
-  const systemMessage = systemPrompts[task] || systemPrompts.story;
-
   try {
-    // Call OpenAI API
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        { role: "system", content: systemMessage },
+        { role: "system", content: systemPrompts[task] || systemPrompts.story },
         { role: "user", content: prompt }
       ],
       temperature: 0.7,
       max_tokens: 1000
     });
 
-    // Calculate cost
-    const usage = completion.usage;
-    const cost = calculateCost(usage.prompt_tokens, usage.completion_tokens);
-    const newTotalUsage = req.user.usage + cost;
-
-    // Save to DB
-    await User.findByIdAndUpdate(req.user._id, { usage: newTotalUsage });
+    const cost = calculateCost(
+      completion.usage.prompt_tokens,
+      completion.usage.completion_tokens
+    );
+    
+    const newUsage = req.user.usage + cost;
+    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
 
     res.json({
       success: true,
       content: completion.choices[0].message.content,
       cost: parseFloat(cost.toFixed(4)),
-      newUsage: parseFloat(newTotalUsage.toFixed(4)),
-      remainingCredit: isEligible ? Math.max(0, FREE_LIMIT - newTotalUsage).toFixed(4) : '0.0000'
+      newUsage: parseFloat(newUsage.toFixed(4))
     });
 
   } catch (error) {
-    console.error('OpenAI Error:', error);
-    res.status(500).json({ 
-      error: 'AI generation failed', 
-      details: error.message 
-    });
+    console.error('OpenAI Error:', error.message);
+    res.status(500).json({ error: 'AI generation failed', details: error.message });
   }
 });
 
 // === EJS TEMPLATES (INLINED) ===
+const ejs = require('ejs');
 const templates = {
   layout: `
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIForge | Business & Esports AI</title>
+  <title>AIForge | Admin AI Platform</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
   <style>
     :root { --primary: #6c5ce7; }
     body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
     .navbar-brand { font-weight: 700; color: var(--primary) !important; }
-    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: none; }
-    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; overflow: hidden; margin: 10px 0; }
+    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
     .usage-fill { height: 100%; border-radius: 6px; }
-    .result-box { background: #f8f9fa; border-left: 4px solid var(--primary); padding: 15px; margin-top: 20px; }
+    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
   </style>
 </head>
 <body>
   <nav class="navbar navbar-light bg-white shadow-sm">
-    <div class="container">
-      <a class="navbar-brand" href="/"><i class="fas fa-bolt me-2"></i>AIForge</a>
+    <div class="container d-flex justify-content-between">
+      <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
       <div>
         <% if (locals.user) { %>
-          <span class="me-3">Hi, <b><%= user.name %></b></span>
-          <form action="/logout" method="POST" class="d-inline">
+          <span><b><%= user.name %></b> 
+            <% if (isAdmin) { %>
+              <span class="badge badge-admin text-white">ADMIN</span>
+            <% } %>
+          </span>
+          <form action="/logout" method="POST" class="d-inline ms-2">
             <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
           </form>
         <% } else { %>
@@ -224,7 +222,7 @@ const templates = {
   <%- body %>
   <footer class="bg-dark text-light py-3 mt-5">
     <div class="container text-center">
-      <small>© 2026 AIForge • Only theceoion@gmail.com gets $5 free credit</small>
+      <small>© 2026 AIForge • Only theceoion@gmail.com is admin with $5 free credit</small>
     </div>
   </footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -237,59 +235,59 @@ const templates = {
 <div class="container py-5">
   <div class="text-center mb-5">
     <h1 class="display-5 fw-bold">AI for <span class="text-primary">Business</span> & <span class="text-success">Esports</span></h1>
-    <p class="lead">Generate code, training data, analyze files, or create unfiltered stories</p>
+    <p class="lead">Code, data, analysis, stories — powered by OpenAI</p>
   </div>
 
   <% if (!user) { %>
-    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to use AI features</div>
+    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
   <% } else { %>
     <div class="row justify-content-center">
       <div class="col-md-8">
         <div class="card p-4">
-          <div class="d-flex justify-content-between mb-3">
-            <h5>Usage Dashboard</h5>
-            <% if (isEligible) { %>
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5>UsageIdashboard</h5>
+            <% if (isAdmin) { %>
               <span class="badge bg-success">Free Tier: $5</span>
             <% } else { %>
-              <span class="badge bg-warning">Paid Plan</span>
+              <span class="badge bg-danger">Paid Plan Required</span>
             <% } %>
           </div>
-          
-          <p>Used: <b>$<%= usage.toFixed(4) %></b></p>
-          
-          <% if (isEligible) { %>
+
+          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
+
+          <% if (isAdmin) { %>
             <div class="usage-meter">
               <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
             </div>
             <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
           <% } %>
 
-          <% if ((isEligible && usage >= FREE_LIMIT) || (!isEligible && usage > 0)) { %>
+          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
             <div class="alert alert-warning mt-3">
               <i class="fas fa-exclamation-triangle me-2"></i>
-              <%= isEligible ? 'Free tier used up' : 'Payment required' %>
+              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
             </div>
           <% } %>
 
           <form id="aiForm" class="mt-4">
             <div class="mb-3">
               <select class="form-select" name="task" required>
-                <option value="code">Generate Professional Code</option>
-                <option value="data">Create Training Data</option>
-                <option value="file">Analyze Content</option>
-                <option value="story">Write Unfiltered Story</option>
+                <option value="code">Professional Code Generation</option>
+                <option value="data">Training Data Creation</option>
+                <option value="file">File/Content Analysis</option>
+                <option value="story">Unfiltered Storytelling</option>
               </select>
             </div>
             <div class="mb-3">
-              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request in detail..." required></textarea>
+              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
             </div>
-            <button type="submit" class="btn btn-primary w-100" 
-              <%= ((isEligible && usage >= FREE_LIMIT) || (!isEligible && usage > 0)) ? 'disabled' : '' %>>
+            <button type="submit" class="btn btn-primary w-100"
+              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
               <i class="fas fa-bolt me-2"></i> Generate with AI
             </button>
           </form>
 
-          <div id="result" class="mt-4" style="display:none;"></div>
+          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
         </div>
       </div>
     </div>
@@ -299,39 +297,31 @@ const templates = {
 <script>
 document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const form = e.target;
-  const submitBtn = form.querySelector('button');
-  const originalText = submitBtn.innerHTML;
-  
-  submitBtn.disabled = true;
-  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
-  
+  const btn = e.submitter;
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
+
   try {
     const res = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.fromEntries(new FormData(form)))
+      body: JSON.stringify(Object.fromEntries(new FormData(e.target)))
     });
-    
     const data = await res.json();
     
     if (res.ok) {
-      document.getElementById('result').innerHTML = 
-        '<div class="result-box"><h6>AI Response (Cost: $' + data.cost + ')</h6><pre>' + 
-        data.content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + 
-        '</pre></div>';
+      document.getElementById('result').textContent = data.content;
       document.getElementById('result').style.display = 'block';
-      
-      // Update usage in UI
-      location.reload();
+      setTimeout(() => location.reload(), 2000); // Refresh usage
     } else {
-      alert('Error: ' + (data.error || 'Unknown error'));
+      alert('Error: ' + (data.error || 'Unknown'));
     }
   } catch (err) {
     alert('Network error: ' + err.message);
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = originalText;
+    btn.disabled = false;
+    btn.innerHTML = original;
   }
 });
 </script>
@@ -355,7 +345,7 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
         <button type="submit" class="btn btn-primary w-100">Login</button>
       </form>
       <div class="text-center mt-3">
-        <small class="text-muted">Only theceoion@gmail.com gets $5 free credit</small>
+        <small class="text-muted">Only theceoion@gmail.com is admin with $5 free credit</small>
       </div>
     </div>
   </div>
@@ -363,33 +353,28 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   `
 };
 
-// EJS engine with inline templates
-app.engine('ejs', (filePath, options, callback) => {
-  const viewName = filePath.split('/').pop().replace('.ejs', '');
-  if (templates[viewName]) {
-    const ejs = require('ejs');
-    const body = ejs.render(templates[viewName], options);
-    const html = ejs.render(templates.layout, { ...options, body });
-    callback(null, html);
-  } else {
-    callback(new Error('Template not found'));
-  }
+app.engine('ejs', (path, opts, cb) => {
+  const name = path.split('/').pop().replace('.ejs', '');
+  if (templates[name]) {
+    const body = ejs.render(templates[name], opts);
+    const html = ejs.render(templates.layout, { ...opts, body });
+    cb(null, html);
+  } else cb(new Error('Template not found'));
 });
 
-// === CREATE DEFAULT ADMIN USER ON STARTUP ===
+// === START SERVER + CREATE ADMIN ===
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   
-  // Create admin user if missing
+  // Auto-create admin account
   const adminEmail = 'theceoion@gmail.com';
-  const adminExists = await User.exists({ email: adminEmail });
-  if (!adminExists) {
-    const admin = new User({
+  const existing = await User.exists({ email: adminEmail });
+  if (!existing) {
+    await new User({
       email: adminEmail,
-      password: 'SecurePass123!', // CHANGE IN PRODUCTION!
+      password: 'CuntFucked26!', // ⚠️ CHANGE THIS IN PRODUCTION!
       name: 'CEO'
-    });
-    await admin.save();
-    console.log('✅ Created admin user:', adminEmail);
+    }).save();
+    console.log('✅ Created admin account:', adminEmail);
   }
 });
