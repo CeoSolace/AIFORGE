@@ -1,4 +1,4 @@
-// app.js — Full AI Platform: Inline EJS, .env Admin, OpenAI, Fixed View Error
+// app.js — 100% filesystem-free, inline templates, .env admin, OpenAI
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -11,26 +11,26 @@ const validator = require('validator');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Validate environment variables
+// Validate env
 const requiredEnv = ['OPENAI_API_KEY', 'MONGODB_URI', 'USER', 'PASSWORD'];
 for (const key of requiredEnv) {
   if (!process.env[key]) {
-    console.error(`❌ Missing ${key} in environment`);
+    console.error(`❌ Missing ${key}`);
     process.exit(1);
   }
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// === DATABASE CONNECTION ===
+// DB
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ Connected to MongoDB'))
+  .then(() => console.log('✅ MongoDB connected'))
   .catch(err => {
-    console.error('❌ MongoDB connection failed:', err.message);
+    console.error('❌ DB Error:', err);
     process.exit(1);
   });
 
-// === USER MODEL ===
+// User model
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
@@ -55,19 +55,15 @@ userSchema.virtual('isAdmin').get(function() {
 userSchema.set('toJSON', { virtuals: true });
 const User = mongoose.model('User', userSchema);
 
-// === MIDDLEWARE ===
+// Middleware
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Session setup
 const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-in-prod',
+  secret: process.env.SESSION_SECRET || 'dev-secret',
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({ 
-    mongoUrl: process.env.MONGODB_URI,
-    collectionName: 'sessions'
-  }),
+  store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
   cookie: { 
     maxAge: 7 * 24 * 60 * 60 * 1000,
     httpOnly: true,
@@ -85,16 +81,12 @@ app.use((req, res, next) => {
   });
 });
 
-// ✅ CRITICAL: EJS SETUP FOR INLINE TEMPLATES (NO VIEWS FOLDER)
-const ejs = require('ejs');
-
-// Tell Express not to look for physical files
-app.set('view engine', 'ejs');
-app.set('views', '/'); // This prevents relative path lookups
-
-// Define all templates in memory
-const templates = {
-  layout: `
+// ✅ INLINE TEMPLATES — NO EJS ENGINE, NO FILESYSTEM
+const renderTemplate = (templateName, options = {}) => {
+  const ejs = require('ejs');
+  
+  const templates = {
+    layout: `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -144,9 +136,9 @@ const templates = {
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
-  `,
-  
-  index: `
+    `,
+    
+    index: `
 <% const FREE_LIMIT = 5; %>
 <div class="container py-5">
   <div class="text-center mb-5">
@@ -256,9 +248,9 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   }
 });
 </script>
-  `,
-  
-  login: `
+    `,
+    
+    login: `
 <div class="container d-flex align-items-center justify-content-center min-vh-100">
   <div class="col-md-6 col-lg-4">
     <div class="card p-4 shadow">
@@ -281,44 +273,73 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
     </div>
   </div>
 </div>
-  `
+    `
+  };
+
+  if (!templates[templateName]) {
+    throw new Error(`Template not found: ${templateName}`);
+  }
+
+  const body = ejs.render(templates[templateName], { ...options, locals: options });
+  return ejs.render(templates.layout, { ...options, body, locals: options });
 };
 
-// ✅ CUSTOM EJS ENGINE — NO FILE SYSTEM ACCESS
-app.engine('ejs', (filePath, options, callback) => {
-  // Extract template name (e.g., "index" from "index.ejs")
-  const templateName = filePath.replace(/\.ejs$/, '');
+// Auth helper
+async function getUserFromSession(req) {
+  if (!req.session || !req.session.userId) return null;
+  try {
+    return await User.findById(req.session.userId).lean();
+  } catch (err) {
+    req.session.destroy();
+    return null;
+  }
+}
+
+// Routes using res.send() instead of res.render()
+app.get('/', async (req, res) => {
+  const user = await getUserFromSession(req);
+  const usage = user ? user.usage : 0;
+  const isAdmin = user ? user.isAdmin : false;
   
-  if (templates[templateName]) {
-    try {
-      const body = ejs.render(templates[templateName], options);
-      const html = ejs.render(templates.layout, { ...options, body });
-      callback(null, html);
-    } catch (err) {
-      callback(err);
-    }
-  } else {
-    callback(new Error(`Template not found: ${templateName}`));
+  try {
+    const html = renderTemplate('index', { user, usage, isAdmin });
+    res.send(html);
+  } catch (err) {
+    console.error('Template error:', err);
+    res.status(500).send('Template error');
   }
 });
 
-// === AUTH HELPER ===
-function requireAuth(req, res, next) {
-  if (!req.session || !req.session.userId) {
-    return res.redirect('/login');
+app.get('/login', (req, res) => {
+  try {
+    const html = renderTemplate('login', { error: null });
+    res.send(html);
+  } catch (err) {
+    res.status(500).send('Template error');
   }
-  User.findById(req.session.userId).lean()
-    .then(user => {
-      if (!user) throw new Error('User not found');
-      req.user = user;
-      next();
-    })
-    .catch(() => {
-      req.session.destroy(() => res.redirect('/login'));
-    });
-}
+});
 
-// === COST & SAFETY ===
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email: email?.toLowerCase().trim() });
+    if (!user || !(await user.comparePassword(password))) {
+      const html = renderTemplate('login', { error: 'Invalid credentials' });
+      return res.send(html);
+    }
+    req.session.userId = user._id.toString();
+    res.redirect('/');
+  } catch (err) {
+    const html = renderTemplate('login', { error: 'Server error' });
+    res.send(html);
+  }
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/'));
+});
+
+// AI endpoint
 const calculateCost = (promptTokens, completionTokens) => {
   const inputCost = (promptTokens / 1_000_000) * 2.50;
   const outputCost = (completionTokens / 1_000_000) * 10.00;
@@ -341,50 +362,15 @@ You are a supportive, ethical AI companion. Follow these rules:
    - International: https://www.befrienders.org
 `;
 
-// === ROUTES ===
-app.get('/', async (req, res) => {
-  let user = null, usage = 0, isAdmin = false;
-  if (req.session && req.session.userId) {
-    try {
-      const u = await User.findById(req.session.userId).lean();
-      if (u) {
-        user = u;
-        usage = u.usage;
-        isAdmin = u.isAdmin;
-      }
-    } catch (err) {
-      req.session.destroy();
-    }
+app.post('/api/generate', async (req, res) => {
+  const user = await getUserFromSession(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
-  res.render('index', { user, usage, isAdmin });
-});
 
-app.get('/login', (req, res) => {
-  res.render('login', { error: null });
-});
-
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const user = await User.findOne({ email: email?.toLowerCase().trim() });
-    if (!user || !(await user.comparePassword(password))) {
-      return res.render('login', { error: 'Invalid credentials' });
-    }
-    req.session.userId = user._id.toString();
-    res.redirect('/');
-  } catch (err) {
-    res.render('login', { error: 'Server error' });
-  }
-});
-
-app.post('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/'));
-});
-
-app.post('/api/generate', requireAuth, async (req, res) => {
   const { prompt, mode } = req.body;
   const FREE_TIER_LIMIT = 5.0;
-  const { isAdmin, usage: currentUsage } = req.user;
+  const { isAdmin, usage: currentUsage } = user;
 
   if (!isAdmin && currentUsage > 0) {
     return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
@@ -423,8 +409,8 @@ app.post('/api/generate', requireAuth, async (req, res) => {
       completion.usage.completion_tokens
     );
     
-    const newUsage = req.user.usage + cost;
-    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
+    const newUsage = user.usage + cost;
+    await User.findByIdAndUpdate(user._id, { usage: newUsage });
 
     res.json({
       success: true,
@@ -442,11 +428,10 @@ app.post('/api/generate', requireAuth, async (req, res) => {
   }
 });
 
-// === START SERVER ===
+// Start server
 const server = app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   
-  // Create admin account from .env
   try {
     const adminEmail = process.env.USER;
     const adminExists = await User.exists({ email: adminEmail });
@@ -464,8 +449,5 @@ const server = app.listen(PORT, async () => {
 });
 
 process.on('SIGTERM', () => {
-  server.close(() => {
-    console.log('🔄 Server shut down gracefully');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
