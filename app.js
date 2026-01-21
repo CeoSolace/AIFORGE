@@ -1,4 +1,4 @@
-// app.js — Full AI Platform: Admin ($5 free), Therapist Mode, Inline EJS, Fixed View Error
+// app.js — Fully fixed for Render.com: session, inline EJS, OpenAI, admin logic
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -11,19 +11,23 @@ const validator = require('validator');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Validate env
+// Validate critical env vars
 if (!process.env.OPENAI_API_KEY) {
-  console.error('❌ Missing OPENAI_API_KEY in .env');
+  console.error('❌ Missing OPENAI_API_KEY in environment');
+  process.exit(1);
+}
+if (!process.env.MONGODB_URI) {
+  console.error('❌ Missing MONGODB_URI in environment');
   process.exit(1);
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// === MONGODB ===
+// === DATABASE ===
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => {
-    console.error('❌ DB Error:', err);
+    console.error('❌ MongoDB connection failed:', err.message);
     process.exit(1);
   });
 
@@ -52,55 +56,42 @@ userSchema.virtual('isAdmin').get(function() {
 userSchema.set('toJSON', { virtuals: true });
 const User = mongoose.model('User', userSchema);
 
-// === MIDDLEWARE ===
+// === MIDDLEWARE (ORDER MATTERS!) ===
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ✅ FIX FOR "Failed to lookup view" ERROR
-app.set('views', '.'); // Trick Express into not requiring a views folder
+// ✅ SESSION SETUP — MUST COME BEFORE ROUTES
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET || 'fallback-dev-secret-change-in-prod',
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({ 
+    mongoUrl: process.env.MONGODB_URI,
+    collectionName: 'sessions'
+  }),
+  cookie: { 
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 1 week
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production' // true on Render (HTTPS)
+  }
+});
+
+// Handle session errors gracefully
+app.use((req, res, next) => {
+  sessionMiddleware(req, res, (err) => {
+    if (err) {
+      console.error('Session error:', err);
+      return res.status(500).send('Session error');
+    }
+    next();
+  });
+});
+
+// ✅ EJS SETUP — NO PHYSICAL VIEWS FOLDER
+app.set('views', '.'); // Prevents "Failed to lookup view" error
 app.set('view engine', 'ejs');
 
-// === AUTH GUARD ===
-function requireAuth(req, res, next) {
-  if (!req.session.userId) return res.redirect('/login');
-  User.findById(req.session.userId).lean()
-    .then(user => {
-      if (!user) throw new Error('User not found');
-      req.user = user;
-      next();
-    })
-    .catch(() => {
-      req.session.destroy();
-      res.redirect('/login');
-    });
-}
-
-// === COST CALCULATION (gpt-4o) ===
-const calculateCost = (promptTokens, completionTokens) => {
-  const inputCost = (promptTokens / 1_000_000) * 2.50;
-  const outputCost = (completionTokens / 1_000_000) * 10.00;
-  return parseFloat((inputCost + outputCost).toFixed(4));
-};
-
-// === SAFE PROMPT HANDLING ===
-const sanitizeInput = (input) => {
-  if (!input || typeof input !== 'string') return '';
-  return validator.escape(input.trim().substring(0, 2000));
-};
-
-// === THERAPIST SAFETY PROTOCOLS ===
-const THERAPIST_GUIDELINES = `
-You are a supportive, ethical AI companion. Follow these rules:
-1. NEVER claim to be a licensed therapist or give medical advice
-2. ALWAYS encourage professional help for serious mental health concerns
-3. NEVER engage with self-harm, violence, or illegal content
-4. Respond with empathy, validation, and reflective listening
-5. If user is in crisis, provide resources:
-   - US: Text/Call 988
-   - International: https://www.befrienders.org
-`;
-
-// === EJS INLINE TEMPLATES ===
+// === EJS TEMPLATES (INLINE) ===
 const ejs = require('ejs');
 const templates = {
   layout: `
@@ -194,7 +185,6 @@ const templates = {
             </div>
           <% } %>
 
-          <!-- Mode Selector -->
           <div class="mb-3">
             <label class="form-label">AI Mode</label>
             <div class="d-flex flex-wrap gap-2">
@@ -225,7 +215,6 @@ const templates = {
 </div>
 
 <script>
-// Mode selector
 document.querySelectorAll('.mode-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
@@ -234,7 +223,6 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
   });
 });
 
-// Form submission
 document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const mode = document.getElementById('modeInput').value;
@@ -296,11 +284,9 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   `
 };
 
-// ✅ CUSTOM EJS ENGINE FOR INLINE TEMPLATES
+// Custom EJS engine for inline templates
 app.engine('ejs', (filePath, options, callback) => {
-  // Extract template name from path (e.g., '/index.ejs' → 'index')
   const templateName = filePath.split('/').pop().replace('.ejs', '');
-  
   if (templates[templateName]) {
     try {
       const body = ejs.render(templates[templateName], options);
@@ -314,22 +300,71 @@ app.engine('ejs', (filePath, options, callback) => {
   }
 });
 
+// === AUTH HELPER ===
+function requireAuth(req, res, next) {
+  // ✅ SAFE CHECK: session might be undefined during errors
+  if (!req.session || !req.session.userId) {
+    return res.redirect('/login');
+  }
+  User.findById(req.session.userId).lean()
+    .then(user => {
+      if (!user) throw new Error('User not found');
+      req.user = user;
+      next();
+    })
+    .catch(() => {
+      req.session.destroy(() => {
+        res.redirect('/login');
+      });
+    });
+}
+
+// === COST & SAFETY ===
+const calculateCost = (promptTokens, completionTokens) => {
+  const inputCost = (promptTokens / 1_000_000) * 2.50;
+  const outputCost = (completionTokens / 1_000_000) * 10.00;
+  return parseFloat((inputCost + outputCost).toFixed(4));
+};
+
+const sanitizeInput = (input) => {
+  if (!input || typeof input !== 'string') return '';
+  return validator.escape(input.trim().substring(0, 2000));
+};
+
+const THERAPIST_GUIDELINES = `
+You are a supportive, ethical AI companion. Follow these rules:
+1. NEVER claim to be a licensed therapist or give medical advice
+2. ALWAYS encourage professional help for serious mental health concerns
+3. NEVER engage with self-harm, violence, or illegal content
+4. Respond with empathy, validation, and reflective listening
+5. If user is in crisis, provide resources:
+   - US: Text/Call 988
+   - International: https://www.befrienders.org
+`;
+
 // === ROUTES ===
 app.get('/', async (req, res) => {
+  // ✅ SAFE SESSION CHECK
   let user = null, usage = 0, isAdmin = false;
-  if (req.session.userId) {
+  if (req.session && req.session.userId) {
     try {
       const u = await User.findById(req.session.userId).lean();
-      if (u) ({ usage, isAdmin } = u);
-      user = u;
+      if (u) {
+        user = u;
+        usage = u.usage;
+        isAdmin = u.isAdmin;
+      }
     } catch (err) {
+      // Silently clear bad session
       req.session.destroy();
     }
   }
   res.render('index', { user, usage, isAdmin });
 });
 
-app.get('/login', (req, res) => res.render('login', { error: null }));
+app.get('/login', (req, res) => {
+  res.render('login', { error: null });
+});
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
@@ -349,13 +384,11 @@ app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/'));
 });
 
-// === AI GENERATION ENDPOINT ===
 app.post('/api/generate', requireAuth, async (req, res) => {
   const { prompt, mode } = req.body;
   const FREE_TIER_LIMIT = 5.0;
   const { isAdmin, usage: currentUsage } = req.user;
 
-  // 🔒 Payment enforcement
   if (!isAdmin && currentUsage > 0) {
     return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
   }
@@ -363,13 +396,11 @@ app.post('/api/generate', requireAuth, async (req, res) => {
     return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
   }
 
-  // 🛡️ Input sanitization
   const cleanPrompt = sanitizeInput(prompt);
   if (!cleanPrompt) {
     return res.status(400).json({ error: 'Invalid prompt' });
   }
 
-  // Build system message
   let systemMessage = "You are a helpful, professional AI assistant.";
   if (mode === 'therapist') {
     systemMessage = THERAPIST_GUIDELINES;
@@ -378,7 +409,6 @@ app.post('/api/generate', requireAuth, async (req, res) => {
   } else if (mode === 'data') {
     systemMessage = "Generate high-quality synthetic training data in JSON format with realistic distributions.";
   }
-  // 'general' and 'custom' use default
 
   try {
     const completion = await openai.chat.completions.create({
@@ -388,9 +418,7 @@ app.post('/api/generate', requireAuth, async (req, res) => {
         { role: "user", content: cleanPrompt }
       ],
       temperature: mode === 'therapist' ? 0.8 : 0.7,
-      max_tokens: 1000,
-      presence_penalty: 0.5,
-      frequency_penalty: 0.5
+      max_tokens: 1000
     });
 
     const cost = calculateCost(
@@ -418,18 +446,30 @@ app.post('/api/generate', requireAuth, async (req, res) => {
 });
 
 // === START SERVER ===
-app.listen(PORT, async () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+const server = app.listen(PORT, async () => {
+  console.log(`🚀 Server running on port ${PORT}`);
   
   // Create admin account
-  const adminEmail = 'theceoion@gmail.com';
-  const existing = await User.exists({ email: adminEmail });
-  if (!existing) {
-    await new User({
-      email: adminEmail,
-      password: 'CuntFuck26!', // ⚠️ CHANGE IN PRODUCTION!
-      name: 'CEO'
-    }).save();
-    console.log('✅ Created admin account:', adminEmail);
+  try {
+    const adminEmail = 'theceoion@gmail.com';
+    const existing = await User.exists({ email: adminEmail });
+    if (!existing) {
+      await new User({
+        email: adminEmail,
+        password: 'SecurePass123!', // ⚠️ CHANGE IN PRODUCTION!
+        name: 'CEO'
+      }).save();
+      console.log('✅ Created admin account:', adminEmail);
+    }
+  } catch (err) {
+    console.error('Admin creation failed:', err.message);
   }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  server.close(() => {
+    console.log('🔄 Server shut down gracefully');
+    process.exit(0);
+  });
 });
