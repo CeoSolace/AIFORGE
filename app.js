@@ -1,4 +1,4 @@
-// app.js — Admin credentials from .env, fixed session, inline EJS, OpenAI
+// app.js — Full AI Platform: Inline EJS, .env Admin, OpenAI, Fixed View Error
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -11,7 +11,7 @@ const validator = require('validator');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Validate env
+// Validate environment variables
 const requiredEnv = ['OPENAI_API_KEY', 'MONGODB_URI', 'USER', 'PASSWORD'];
 for (const key of requiredEnv) {
   if (!process.env[key]) {
@@ -22,7 +22,7 @@ for (const key of requiredEnv) {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// === DATABASE ===
+// === DATABASE CONNECTION ===
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => {
@@ -48,7 +48,6 @@ userSchema.methods.comparePassword = async function(candidate) {
   return await bcrypt.compare(candidate, this.password);
 };
 
-// 👑 Admin is now defined by .env USER
 userSchema.virtual('isAdmin').get(function() {
   return this.email === process.env.USER;
 });
@@ -86,20 +85,210 @@ app.use((req, res, next) => {
   });
 });
 
-// EJS setup
-app.set('views', '.');
-app.set('view engine', 'ejs');
-
-// === EJS TEMPLATES (same as before - omitted for brevity but included in full code below) ===
+// ✅ CRITICAL: EJS SETUP FOR INLINE TEMPLATES (NO VIEWS FOLDER)
 const ejs = require('ejs');
+
+// Tell Express not to look for physical files
+app.set('view engine', 'ejs');
+app.set('views', '/'); // This prevents relative path lookups
+
+// Define all templates in memory
 const templates = {
-  layout: `...`, // (full template below)
-  index: `...`,
-  login: `...`
+  layout: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AIForge | Admin AI Platform</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+  <style>
+    :root { --primary: #6c5ce7; }
+    body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
+    .navbar-brand { font-weight: 700; color: var(--primary) !important; }
+    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
+    .usage-fill { height: 100%; border-radius: 6px; }
+    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
+    .mode-btn { transition: all 0.2s; }
+    .mode-btn.active { background: var(--primary); color: white; }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-light bg-white shadow-sm">
+    <div class="container d-flex justify-content-between">
+      <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
+      <div>
+        <% if (locals.user) { %>
+          <span><b><%= user.name %></b> 
+            <% if (isAdmin) { %>
+              <span class="badge badge-admin text-white">ADMIN</span>
+            <% } %>
+          </span>
+          <form action="/logout" method="POST" class="d-inline ms-2">
+            <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
+          </form>
+        <% } else { %>
+          <a href="/login" class="btn btn-primary btn-sm">Login</a>
+        <% } %>
+      </div>
+    </div>
+  </nav>
+  <%- body %>
+  <footer class="bg-dark text-light py-3 mt-5">
+    <div class="container text-center">
+      <small>© 2026 AIForge • Admin: <%= process.env.USER || 'admin' %></small>
+    </div>
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+  `,
+  
+  index: `
+<% const FREE_LIMIT = 5; %>
+<div class="container py-5">
+  <div class="text-center mb-5">
+    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
+    <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
+  </div>
+
+  <% if (!user) { %>
+    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
+  <% } else { %>
+    <div class="row justify-content-center">
+      <div class="col-md-8">
+        <div class="card p-4">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5>UsageIdashboard</h5>
+            <% if (isAdmin) { %>
+              <span class="badge bg-success">Free Tier: $5</span>
+            <% } else { %>
+              <span class="badge bg-danger">Paid Plan Required</span>
+            <% } %>
+          </div>
+
+          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
+
+          <% if (isAdmin) { %>
+            <div class="usage-meter">
+              <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
+            </div>
+            <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
+          <% } %>
+
+          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
+            <div class="alert alert-warning mt-3">
+              <i class="fas fa-exclamation-triangle me-2"></i>
+              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
+            </div>
+          <% } %>
+
+          <div class="mb-3">
+            <label class="form-label">AI Mode</label>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
+              <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
+              <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
+              <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
+              <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
+            </div>
+            <input type="hidden" id="modeInput" name="mode" value="general">
+          </div>
+
+          <form id="aiForm" class="mt-3">
+            <div class="mb-3">
+              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary w-100"
+              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
+              <i class="fas fa-bolt me-2"></i> Generate with AI
+            </button>
+          </form>
+
+          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
+        </div>
+      </div>
+    </div>
+  <% } %>
+</div>
+
+<script>
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('modeInput').value = btn.dataset.mode;
+  });
+});
+
+document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const mode = document.getElementById('modeInput').value;
+  const prompt = e.target.prompt.value;
+  
+  const btn = e.submitter;
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, mode })
+    });
+    const data = await res.json();
+    
+    if (res.ok) {
+      document.getElementById('result').textContent = data.content;
+      document.getElementById('result').style.display = 'block';
+      setTimeout(() => location.reload(), 2000);
+    } else {
+      alert('Error: ' + (data.error || 'Unknown'));
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+});
+</script>
+  `,
+  
+  login: `
+<div class="container d-flex align-items-center justify-content-center min-vh-100">
+  <div class="col-md-6 col-lg-4">
+    <div class="card p-4 shadow">
+      <h3 class="text-center mb-4">AIForge Login</h3>
+      <% if (locals.error) { %>
+        <div class="alert alert-danger"><%= error %></div>
+      <% } %>
+      <form method="POST">
+        <div class="mb-3">
+          <input type="email" class="form-control" name="email" placeholder="Email" required>
+        </div>
+        <div class="mb-3">
+          <input type="password" class="form-control" name="password" placeholder="Password" required>
+        </div>
+        <button type="submit" class="btn btn-primary w-100">Login</button>
+      </form>
+      <div class="text-center mt-3">
+        <small class="text-muted">Admin: <%= process.env.USER || 'admin@example.com' %></small>
+      </div>
+    </div>
+  </div>
+</div>
+  `
 };
 
+// ✅ CUSTOM EJS ENGINE — NO FILE SYSTEM ACCESS
 app.engine('ejs', (filePath, options, callback) => {
-  const templateName = filePath.split('/').pop().replace('.ejs', '');
+  // Extract template name (e.g., "index" from "index.ejs")
+  const templateName = filePath.replace(/\.ejs$/, '');
+  
   if (templates[templateName]) {
     try {
       const body = ejs.render(templates[templateName], options);
@@ -257,7 +446,7 @@ app.post('/api/generate', requireAuth, async (req, res) => {
 const server = app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   
-  // Create admin from .env
+  // Create admin account from .env
   try {
     const adminEmail = process.env.USER;
     const adminExists = await User.exists({ email: adminEmail });
@@ -280,193 +469,3 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
-
-// === FULL EJS TEMPLATES ===
-templates.layout = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIForge | Admin AI Platform</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
-  <style>
-    :root { --primary: #6c5ce7; }
-    body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
-    .navbar-brand { font-weight: 700; color: var(--primary) !important; }
-    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
-    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
-    .usage-fill { height: 100%; border-radius: 6px; }
-    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
-    .mode-btn { transition: all 0.2s; }
-    .mode-btn.active { background: var(--primary); color: white; }
-  </style>
-</head>
-<body>
-  <nav class="navbar navbar-light bg-white shadow-sm">
-    <div class="container d-flex justify-content-between">
-      <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
-      <div>
-        <% if (locals.user) { %>
-          <span><b><%= user.name %></b> 
-            <% if (isAdmin) { %>
-              <span class="badge badge-admin text-white">ADMIN</span>
-            <% } %>
-          </span>
-          <form action="/logout" method="POST" class="d-inline ms-2">
-            <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
-          </form>
-        <% } else { %>
-          <a href="/login" class="btn btn-primary btn-sm">Login</a>
-        <% } %>
-      </div>
-    </div>
-  </nav>
-  <%- body %>
-  <footer class="bg-dark text-light py-3 mt-5">
-    <div class="container text-center">
-      <small>© 2026 AIForge • Admin: <%= process.env.USER || 'theceoion@gmail.com' %></small>
-    </div>
-  </footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-`;
-
-templates.index = `
-<% const FREE_LIMIT = 5; %>
-<div class="container py-5">
-  <div class="text-center mb-5">
-    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
-    <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
-  </div>
-
-  <% if (!user) { %>
-    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
-  <% } else { %>
-    <div class="row justify-content-center">
-      <div class="col-md-8">
-        <div class="card p-4">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5>UsageIdashboard</h5>
-            <% if (isAdmin) { %>
-              <span class="badge bg-success">Free Tier: $5</span>
-            <% } else { %>
-              <span class="badge bg-danger">Paid Plan Required</span>
-            <% } %>
-          </div>
-
-          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
-
-          <% if (isAdmin) { %>
-            <div class="usage-meter">
-              <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
-            </div>
-            <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
-          <% } %>
-
-          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
-            <div class="alert alert-warning mt-3">
-              <i class="fas fa-exclamation-triangle me-2"></i>
-              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
-            </div>
-          <% } %>
-
-          <div class="mb-3">
-            <label class="form-label">AI Mode</label>
-            <div class="d-flex flex-wrap gap-2">
-              <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
-              <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
-              <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
-              <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
-              <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
-            </div>
-            <input type="hidden" id="modeInput" name="mode" value="general">
-          </div>
-
-          <form id="aiForm" class="mt-3">
-            <div class="mb-3">
-              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
-            </div>
-            <button type="submit" class="btn btn-primary w-100"
-              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
-              <i class="fas fa-bolt me-2"></i> Generate with AI
-            </button>
-          </form>
-
-          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
-        </div>
-      </div>
-    </div>
-  <% } %>
-</div>
-
-<script>
-document.querySelectorAll('.mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('modeInput').value = btn.dataset.mode;
-  });
-});
-
-document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const mode = document.getElementById('modeInput').value;
-  const prompt = e.target.prompt.value;
-  
-  const btn = e.submitter;
-  const original = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
-
-  try {
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, mode })
-    });
-    const data = await res.json();
-    
-    if (res.ok) {
-      document.getElementById('result').textContent = data.content;
-      document.getElementById('result').style.display = 'block';
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      alert('Error: ' + (data.error || 'Unknown'));
-    }
-  } catch (err) {
-    alert('Network error: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = original;
-  }
-});
-</script>
-`;
-
-templates.login = `
-<div class="container d-flex align-items-center justify-content-center min-vh-100">
-  <div class="col-md-6 col-lg-4">
-    <div class="card p-4 shadow">
-      <h3 class="text-center mb-4">AIForge Login</h3>
-      <% if (locals.error) { %>
-        <div class="alert alert-danger"><%= error %></div>
-      <% } %>
-      <form method="POST">
-        <div class="mb-3">
-          <input type="email" class="form-control" name="email" placeholder="Email" required>
-        </div>
-        <div class="mb-3">
-          <input type="password" class="form-control" name="password" placeholder="Password" required>
-        </div>
-        <button type="submit" class="btn btn-primary w-100">Login</button>
-      </form>
-      <div class="text-center mt-3">
-        <small class="text-muted">Admin: <%= process.env.USER || 'theceoion@gmail.com' %></small>
-      </div>
-    </div>
-  </div>
-</div>
-`;
