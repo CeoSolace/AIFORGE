@@ -1,4 +1,64 @@
-<div class="container py-5">
-  <h1>AIForge Dashboard</h1>
-  <!-- your full dashboard code: usage bar, mode buttons, form, result pre, script tag etc. -->
-</div>
+<% if (!user) { %>
+  <div class="alert alert-info text-center">
+    Please <a href="/login">log in</a> to use the AI chat.
+  </div>
+<% } else { %>
+  <h2 class="mb-4">AI Chat</h2>
+
+  <div id="chat-messages" class="border p-3 mb-3 bg-white rounded">
+    <!-- messages appear here -->
+  </div>
+
+  <form id="chat-form" class="input-group">
+    <input type="text" id="message" class="form-control" placeholder="Type your message..." autocomplete="off" required>
+    <button type="submit" class="btn btn-primary">Send</button>
+  </form>
+
+  <script>
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('message');
+    const messagesDiv = document.getElementById('chat-messages');
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+
+      // Show user message
+      const userMsg = document.createElement('div');
+      userMsg.className = 'message user text-end';
+      userMsg.textContent = text;
+      messagesDiv.appendChild(userMsg);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+      input.value = '';
+      input.disabled = true;
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) throw new Error(data.error || 'Request failed');
+
+        const botMsg = document.createElement('div');
+        botMsg.className = 'message bot';
+        botMsg.textContent = data.reply;
+        messagesDiv.appendChild(botMsg);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      } catch (err) {
+        const errMsg = document.createElement('div');
+        errMsg.className = 'message bot text-danger';
+        errMsg.textContent = 'Error: ' + err.message;
+        messagesDiv.appendChild(errMsg);
+      } finally {
+        input.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+<% } %>
