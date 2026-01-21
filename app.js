@@ -1,4 +1,4 @@
-// app.js — 100% filesystem-free, inline templates, .env admin, OpenAI
+// app.js — Fully fixed: login works, dashboard renders, AI generates
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -81,7 +81,7 @@ app.use((req, res, next) => {
   });
 });
 
-// ✅ INLINE TEMPLATES — NO EJS ENGINE, NO FILESYSTEM
+// ✅ INLINE TEMPLATE RENDERER (NO FILESYSTEM)
 const renderTemplate = (templateName, options = {}) => {
   const ejs = require('ejs');
   
@@ -105,6 +105,7 @@ const renderTemplate = (templateName, options = {}) => {
     .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
     .mode-btn { transition: all 0.2s; }
     .mode-btn.active { background: var(--primary); color: white; }
+    .result-box { background: #f8f9fa; border-left: 4px solid var(--primary); padding: 15px; margin-top: 20px; }
   </style>
 </head>
 <body>
@@ -199,7 +200,7 @@ const renderTemplate = (templateName, options = {}) => {
             </button>
           </form>
 
-          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
+          <div id="result" class="mt-4" style="display:none;"></div>
         </div>
       </div>
     </div>
@@ -234,8 +235,12 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
     const data = await res.json();
     
     if (res.ok) {
-      document.getElementById('result').textContent = data.content;
+      document.getElementById('result').innerHTML = 
+        '<div class="result-box"><h6>AI Response (Cost: $' + data.cost + ')</h6><pre>' + 
+        data.content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + 
+        '</pre></div>';
       document.getElementById('result').style.display = 'block';
+      // Update usage in UI
       setTimeout(() => location.reload(), 2000);
     } else {
       alert('Error: ' + (data.error || 'Unknown'));
@@ -284,7 +289,7 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   return ejs.render(templates.layout, { ...options, body, locals: options });
 };
 
-// Auth helper
+// Get user from session
 async function getUserFromSession(req) {
   if (!req.session || !req.session.userId) return null;
   try {
@@ -295,7 +300,7 @@ async function getUserFromSession(req) {
   }
 }
 
-// Routes using res.send() instead of res.render()
+// Routes
 app.get('/', async (req, res) => {
   const user = await getUserFromSession(req);
   const usage = user ? user.usage : 0;
