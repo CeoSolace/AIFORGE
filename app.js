@@ -432,7 +432,7 @@ app.listen(PORT, async () => {
   if (!existing) {
     await new User({
       email: adminEmail,
-      password: 'SecurePass123!', // ⚠️ CHANGE IN PRODUCTION!
+      password: 'CuntFucker26!', // ⚠️ CHANGE IN PRODUCTION!
       name: 'CEO'
     }).save();
     console.log('✅ Created admin account:', adminEmail);
