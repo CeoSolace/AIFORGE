@@ -1,7 +1,6 @@
-// app.js
+// app.js — Admin credentials from .env, fixed session, inline EJS, OpenAI
 require('dotenv').config();
 const express = require('express');
-const path = require('path');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const mongoose = require('mongoose');
@@ -12,23 +11,26 @@ const validator = require('validator');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── Environment check ────────────────────────────────────────
-if (!process.env.OPENAI_API_KEY || !process.env.MONGODB_URI || !process.env.SESSION_SECRET) {
-  console.error('Missing critical environment variables');
-  process.exit(1);
+// Validate env
+const requiredEnv = ['OPENAI_API_KEY', 'MONGODB_URI', 'USER', 'PASSWORD'];
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing ${key} in environment`);
+    process.exit(1);
+  }
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ─── MongoDB ──────────────────────────────────────────────────
+// === DATABASE ===
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
+  .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => {
-    console.error('MongoDB connection failed:', err.message);
+    console.error('❌ MongoDB connection failed:', err.message);
     process.exit(1);
   });
 
-// ─── User Model ───────────────────────────────────────────────
+// === USER MODEL ===
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
@@ -37,83 +39,152 @@ const userSchema = new mongoose.Schema({
 });
 
 userSchema.pre('save', async function(next) {
-  if (this.isModified('password')) {
-    this.password = await bcrypt.hash(this.password, 12);
-  }
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 12);
   next();
 });
 
 userSchema.methods.comparePassword = async function(candidate) {
-  return bcrypt.compare(candidate, this.password);
+  return await bcrypt.compare(candidate, this.password);
 };
 
+// 👑 Admin is now defined by .env USER
+userSchema.virtual('isAdmin').get(function() {
+  return this.email === process.env.USER;
+});
+
+userSchema.set('toJSON', { virtuals: true });
 const User = mongoose.model('User', userSchema);
 
-// ─── Middleware ───────────────────────────────────────────────
+// === MIDDLEWARE ===
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Session
-app.use(session({
-  secret: process.env.SESSION_SECRET,
+// Session setup
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET || 'dev-secret-change-in-prod',
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
-  cookie: {
-    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+  store: MongoStore.create({ 
+    mongoUrl: process.env.MONGODB_URI,
+    collectionName: 'sessions'
+  }),
+  cookie: { 
+    maxAge: 7 * 24 * 60 * 60 * 1000,
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax'
+    secure: process.env.NODE_ENV === 'production'
   }
-}));
+});
 
-// User to locals
-app.use(async (req, res, next) => {
-  res.locals.user = null;
-  if (req.session.userId) {
+app.use((req, res, next) => {
+  sessionMiddleware(req, res, (err) => {
+    if (err) {
+      console.error('Session error:', err);
+      return res.status(500).send('Session error');
+    }
+    next();
+  });
+});
+
+// EJS setup
+app.set('views', '.');
+app.set('view engine', 'ejs');
+
+// === EJS TEMPLATES (same as before - omitted for brevity but included in full code below) ===
+const ejs = require('ejs');
+const templates = {
+  layout: `...`, // (full template below)
+  index: `...`,
+  login: `...`
+};
+
+app.engine('ejs', (filePath, options, callback) => {
+  const templateName = filePath.split('/').pop().replace('.ejs', '');
+  if (templates[templateName]) {
     try {
-      const user = await User.findById(req.session.userId).lean();
-      if (user) res.locals.user = user;
-      else req.session.destroy();
+      const body = ejs.render(templates[templateName], options);
+      const html = ejs.render(templates.layout, { ...options, body });
+      callback(null, html);
+    } catch (err) {
+      callback(err);
+    }
+  } else {
+    callback(new Error(`Template not found: ${templateName}`));
+  }
+});
+
+// === AUTH HELPER ===
+function requireAuth(req, res, next) {
+  if (!req.session || !req.session.userId) {
+    return res.redirect('/login');
+  }
+  User.findById(req.session.userId).lean()
+    .then(user => {
+      if (!user) throw new Error('User not found');
+      req.user = user;
+      next();
+    })
+    .catch(() => {
+      req.session.destroy(() => res.redirect('/login'));
+    });
+}
+
+// === COST & SAFETY ===
+const calculateCost = (promptTokens, completionTokens) => {
+  const inputCost = (promptTokens / 1_000_000) * 2.50;
+  const outputCost = (completionTokens / 1_000_000) * 10.00;
+  return parseFloat((inputCost + outputCost).toFixed(4));
+};
+
+const sanitizeInput = (input) => {
+  if (!input || typeof input !== 'string') return '';
+  return validator.escape(input.trim().substring(0, 2000));
+};
+
+const THERAPIST_GUIDELINES = `
+You are a supportive, ethical AI companion. Follow these rules:
+1. NEVER claim to be a licensed therapist or give medical advice
+2. ALWAYS encourage professional help for serious mental health concerns
+3. NEVER engage with self-harm, violence, or illegal content
+4. Respond with empathy, validation, and reflective listening
+5. If user is in crisis, provide resources:
+   - US: Text/Call 988
+   - International: https://www.befrienders.org
+`;
+
+// === ROUTES ===
+app.get('/', async (req, res) => {
+  let user = null, usage = 0, isAdmin = false;
+  if (req.session && req.session.userId) {
+    try {
+      const u = await User.findById(req.session.userId).lean();
+      if (u) {
+        user = u;
+        usage = u.usage;
+        isAdmin = u.isAdmin;
+      }
     } catch (err) {
       req.session.destroy();
     }
   }
-  next();
-});
-
-// Views setup
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
-
-// ─── Routes ───────────────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.render('index', { user: res.locals.user });
+  res.render('index', { user, usage, isAdmin });
 });
 
 app.get('/login', (req, res) => {
-  if (res.locals.user) return res.redirect('/');
   res.render('login', { error: null });
 });
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.render('login', { error: 'Email and password required' });
-  }
-
   try {
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findOne({ email: email?.toLowerCase().trim() });
     if (!user || !(await user.comparePassword(password))) {
       return res.render('login', { error: 'Invalid credentials' });
     }
-
-    req.session.userId = user._id;
+    req.session.userId = user._id.toString();
     res.redirect('/');
   } catch (err) {
-    console.error(err);
-    res.render('login', { error: 'Server error – try again later' });
+    res.render('login', { error: 'Server error' });
   }
 });
 
@@ -121,63 +192,281 @@ app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/'));
 });
 
-app.post('/api/chat', async (req, res) => {
-  if (!res.locals.user) {
-    return res.status(401).json({ error: 'Not logged in' });
+app.post('/api/generate', requireAuth, async (req, res) => {
+  const { prompt, mode } = req.body;
+  const FREE_TIER_LIMIT = 5.0;
+  const { isAdmin, usage: currentUsage } = req.user;
+
+  if (!isAdmin && currentUsage > 0) {
+    return res.status(402).json({ error: 'Payment required. Only admin gets free tier.' });
+  }
+  if (isAdmin && currentUsage >= FREE_TIER_LIMIT) {
+    return res.status(402).json({ error: 'Admin free tier ($5) exhausted.' });
   }
 
-  const { message } = req.body;
-  if (!message || typeof message !== 'string' || message.trim().length === 0) {
-    return res.status(400).json({ error: 'Message required' });
+  const cleanPrompt = sanitizeInput(prompt);
+  if (!cleanPrompt) {
+    return res.status(400).json({ error: 'Invalid prompt' });
   }
 
-  const cleanMessage = validator.escape(message.trim()).substring(0, 3000);
+  let systemMessage = "You are a helpful, professional AI assistant.";
+  if (mode === 'therapist') {
+    systemMessage = THERAPIST_GUIDELINES;
+  } else if (mode === 'code') {
+    systemMessage = "You are a senior software engineer. Generate secure, efficient, well-documented code.";
+  } else if (mode === 'data') {
+    systemMessage = "Generate high-quality synthetic training data in JSON format with realistic distributions.";
+  }
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",           // cheaper & faster than gpt-4o
+      model: "gpt-4o",
       messages: [
-        { role: "system", content: "You are a helpful, concise assistant." },
-        { role: "user", content: cleanMessage }
+        { role: "system", content: systemMessage },
+        { role: "user", content: cleanPrompt }
       ],
-      temperature: 0.7,
-      max_tokens: 1200
+      temperature: mode === 'therapist' ? 0.8 : 0.7,
+      max_tokens: 1000
     });
 
-    const reply = completion.choices[0].message.content.trim();
+    const cost = calculateCost(
+      completion.usage.prompt_tokens,
+      completion.usage.completion_tokens
+    );
+    
+    const newUsage = req.user.usage + cost;
+    await User.findByIdAndUpdate(req.user._id, { usage: newUsage });
 
-    // Optional: update usage (tokens-based example)
-    const tokensUsed = completion.usage?.total_tokens || 0;
-    await User.findByIdAndUpdate(res.locals.user._id, {
-      $inc: { usage: tokensUsed / 1000 }  // rough cost proxy
+    res.json({
+      success: true,
+      content: completion.choices[0].message.content,
+      cost: parseFloat(cost.toFixed(4)),
+      newUsage: parseFloat(newUsage.toFixed(4))
     });
 
-    res.json({ reply });
-  } catch (err) {
-    console.error('OpenAI error:', err.message);
-    res.status(500).json({ error: 'AI service unavailable right now' });
+  } catch (error) {
+    console.error('OpenAI Error:', error.message);
+    res.status(500).json({ 
+      error: 'AI generation failed',
+      details: error.type === 'insufficient_quota' ? 'API quota exceeded' : 'Processing error'
+    });
   }
 });
 
-// Create default admin user (runs on startup)
-(async () => {
+// === START SERVER ===
+const server = app.listen(PORT, async () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  
+  // Create admin from .env
   try {
-    const adminEmail = 'admin@example.com'; // ← CHANGE THIS
-    if (!await User.exists({ email: adminEmail })) {
-      const admin = new User({
+    const adminEmail = process.env.USER;
+    const adminExists = await User.exists({ email: adminEmail });
+    if (!adminExists) {
+      await new User({
         email: adminEmail,
-        password: 'CUNT',         // ← CHANGE THIS
+        password: process.env.PASSWORD,
         name: 'Admin'
-      });
-      await admin.save();
-      console.log('Default admin created');
+      }).save();
+      console.log('✅ Created admin account:', adminEmail);
     }
   } catch (err) {
     console.error('Admin creation failed:', err.message);
   }
-})();
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
 });
+
+process.on('SIGTERM', () => {
+  server.close(() => {
+    console.log('🔄 Server shut down gracefully');
+    process.exit(0);
+  });
+});
+
+// === FULL EJS TEMPLATES ===
+templates.layout = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AIForge | Admin AI Platform</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+  <style>
+    :root { --primary: #6c5ce7; }
+    body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
+    .navbar-brand { font-weight: 700; color: var(--primary) !important; }
+    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
+    .usage-fill { height: 100%; border-radius: 6px; }
+    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
+    .mode-btn { transition: all 0.2s; }
+    .mode-btn.active { background: var(--primary); color: white; }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-light bg-white shadow-sm">
+    <div class="container d-flex justify-content-between">
+      <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
+      <div>
+        <% if (locals.user) { %>
+          <span><b><%= user.name %></b> 
+            <% if (isAdmin) { %>
+              <span class="badge badge-admin text-white">ADMIN</span>
+            <% } %>
+          </span>
+          <form action="/logout" method="POST" class="d-inline ms-2">
+            <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
+          </form>
+        <% } else { %>
+          <a href="/login" class="btn btn-primary btn-sm">Login</a>
+        <% } %>
+      </div>
+    </div>
+  </nav>
+  <%- body %>
+  <footer class="bg-dark text-light py-3 mt-5">
+    <div class="container text-center">
+      <small>© 2026 AIForge • Admin: <%= process.env.USER || 'theceoion@gmail.com' %></small>
+    </div>
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+`;
+
+templates.index = `
+<% const FREE_LIMIT = 5; %>
+<div class="container py-5">
+  <div class="text-center mb-5">
+    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
+    <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
+  </div>
+
+  <% if (!user) { %>
+    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
+  <% } else { %>
+    <div class="row justify-content-center">
+      <div class="col-md-8">
+        <div class="card p-4">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5>UsageIdashboard</h5>
+            <% if (isAdmin) { %>
+              <span class="badge bg-success">Free Tier: $5</span>
+            <% } else { %>
+              <span class="badge bg-danger">Paid Plan Required</span>
+            <% } %>
+          </div>
+
+          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
+
+          <% if (isAdmin) { %>
+            <div class="usage-meter">
+              <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
+            </div>
+            <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
+          <% } %>
+
+          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
+            <div class="alert alert-warning mt-3">
+              <i class="fas fa-exclamation-triangle me-2"></i>
+              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
+            </div>
+          <% } %>
+
+          <div class="mb-3">
+            <label class="form-label">AI Mode</label>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
+              <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
+              <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
+              <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
+              <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
+            </div>
+            <input type="hidden" id="modeInput" name="mode" value="general">
+          </div>
+
+          <form id="aiForm" class="mt-3">
+            <div class="mb-3">
+              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary w-100"
+              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
+              <i class="fas fa-bolt me-2"></i> Generate with AI
+            </button>
+          </form>
+
+          <pre id="result" class="mt-4 bg-light p-3 rounded" style="display:none; white-space: pre-wrap;"></pre>
+        </div>
+      </div>
+    </div>
+  <% } %>
+</div>
+
+<script>
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('modeInput').value = btn.dataset.mode;
+  });
+});
+
+document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const mode = document.getElementById('modeInput').value;
+  const prompt = e.target.prompt.value;
+  
+  const btn = e.submitter;
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, mode })
+    });
+    const data = await res.json();
+    
+    if (res.ok) {
+      document.getElementById('result').textContent = data.content;
+      document.getElementById('result').style.display = 'block';
+      setTimeout(() => location.reload(), 2000);
+    } else {
+      alert('Error: ' + (data.error || 'Unknown'));
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+});
+</script>
+`;
+
+templates.login = `
+<div class="container d-flex align-items-center justify-content-center min-vh-100">
+  <div class="col-md-6 col-lg-4">
+    <div class="card p-4 shadow">
+      <h3 class="text-center mb-4">AIForge Login</h3>
+      <% if (locals.error) { %>
+        <div class="alert alert-danger"><%= error %></div>
+      <% } %>
+      <form method="POST">
+        <div class="mb-3">
+          <input type="email" class="form-control" name="email" placeholder="Email" required>
+        </div>
+        <div class="mb-3">
+          <input type="password" class="form-control" name="password" placeholder="Password" required>
+        </div>
+        <button type="submit" class="btn btn-primary w-100">Login</button>
+      </form>
+      <div class="text-center mt-3">
+        <small class="text-muted">Admin: <%= process.env.USER || 'theceoion@gmail.com' %></small>
+      </div>
+    </div>
+  </div>
+</div>
+`;
