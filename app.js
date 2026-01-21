@@ -1,4 +1,4 @@
-// app.js — Fully fixed: login works, dashboard renders, AI generates
+// app.js — Full AI platform with /dashboard chat after login
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -81,7 +81,7 @@ app.use((req, res, next) => {
   });
 });
 
-// ✅ INLINE TEMPLATE RENDERER (NO FILESYSTEM)
+// ✅ INLINE TEMPLATES
 const renderTemplate = (templateName, options = {}) => {
   const ejs = require('ejs');
   
@@ -92,31 +92,33 @@ const renderTemplate = (templateName, options = {}) => {
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIForge | Admin AI Platform</title>
+  <title>AIForge | Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
   <style>
     :root { --primary: #6c5ce7; }
-    body { background: linear-gradient(135deg, #f8f9ff, #eef2ff); min-height: 100vh; }
+    body { background: #f8f9fa; min-height: 100vh; }
     .navbar-brand { font-weight: 700; color: var(--primary) !important; }
-    .card { border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
-    .usage-meter { height: 12px; background: #e9ecef; border-radius: 6px; margin: 10px 0; overflow: hidden; }
-    .usage-fill { height: 100%; border-radius: 6px; }
-    .badge-admin { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
+    .chat-container { max-width: 900px; margin: 0 auto; }
+    .chat-box { height: 500px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 10px; padding: 15px; background: white; }
+    .message { margin-bottom: 15px; padding: 10px; border-radius: 8px; }
+    .user-message { background: #e3f2fd; margin-left: 20%; }
+    .ai-message { background: #f1f8e9; margin-right: 20%; }
+    .usage-bar { height: 8px; background: #e9ecef; border-radius: 4px; margin: 10px 0; overflow: hidden; }
+    .usage-fill { height: 100%; border-radius: 4px; }
     .mode-btn { transition: all 0.2s; }
     .mode-btn.active { background: var(--primary); color: white; }
-    .result-box { background: #f8f9fa; border-left: 4px solid var(--primary); padding: 15px; margin-top: 20px; }
   </style>
 </head>
 <body>
   <nav class="navbar navbar-light bg-white shadow-sm">
     <div class="container d-flex justify-content-between">
-      <a class="navbar-brand" href="/"><i class="fas fa-crown me-2"></i>AIForge</a>
+      <a class="navbar-brand" href="/dashboard"><i class="fas fa-comments me-2"></i>AIForge</a>
       <div>
         <% if (locals.user) { %>
           <span><b><%= user.name %></b> 
             <% if (isAdmin) { %>
-              <span class="badge badge-admin text-white">ADMIN</span>
+              <span class="badge bg-primary">ADMIN</span>
             <% } %>
           </span>
           <form action="/logout" method="POST" class="d-inline ms-2">
@@ -129,130 +131,14 @@ const renderTemplate = (templateName, options = {}) => {
     </div>
   </nav>
   <%- body %>
-  <footer class="bg-dark text-light py-3 mt-5">
+  <footer class="bg-light py-3 mt-4">
     <div class="container text-center">
-      <small>© 2026 AIForge • Admin: <%= process.env.USER || 'admin' %></small>
+      <small>© 2026 AIForge • Only admin gets $5 free credit</small>
     </div>
   </footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
-    `,
-    
-    index: `
-<% const FREE_LIMIT = 5; %>
-<div class="container py-5">
-  <div class="text-center mb-5">
-    <h1 class="display-5 fw-bold">AIForge: Business, Esports & Support</h1>
-    <p class="lead">Professional AI for code, data, analysis, stories, and emotional support</p>
-  </div>
-
-  <% if (!user) { %>
-    <div class="alert alert-info text-center">Please <a href="/login">log in</a> to access AI features</div>
-  <% } else { %>
-    <div class="row justify-content-center">
-      <div class="col-md-8">
-        <div class="card p-4">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5>UsageIdashboard</h5>
-            <% if (isAdmin) { %>
-              <span class="badge bg-success">Free Tier: $5</span>
-            <% } else { %>
-              <span class="badge bg-danger">Paid Plan Required</span>
-            <% } %>
-          </div>
-
-          <p>Total used: <b>$<%= usage.toFixed(4) %></b></p>
-
-          <% if (isAdmin) { %>
-            <div class="usage-meter">
-              <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
-            </div>
-            <small class="text-muted">Remaining: $<%= (FREE_LIMIT - usage).toFixed(4) %></small>
-          <% } %>
-
-          <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
-            <div class="alert alert-warning mt-3">
-              <i class="fas fa-exclamation-triangle me-2"></i>
-              <%= isAdmin ? 'Admin free tier exhausted' : 'Payment required for non-admin accounts' %>
-            </div>
-          <% } %>
-
-          <div class="mb-3">
-            <label class="form-label">AI Mode</label>
-            <div class="d-flex flex-wrap gap-2">
-              <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
-              <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
-              <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
-              <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
-              <button type="button" class="btn btn-outline-secondary mode-btn" data-mode="custom">Custom</button>
-            </div>
-            <input type="hidden" id="modeInput" name="mode" value="general">
-          </div>
-
-          <form id="aiForm" class="mt-3">
-            <div class="mb-3">
-              <textarea class="form-control" name="prompt" rows="4" placeholder="Describe your request..." required></textarea>
-            </div>
-            <button type="submit" class="btn btn-primary w-100"
-              <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
-              <i class="fas fa-bolt me-2"></i> Generate with AI
-            </button>
-          </form>
-
-          <div id="result" class="mt-4" style="display:none;"></div>
-        </div>
-      </div>
-    </div>
-  <% } %>
-</div>
-
-<script>
-document.querySelectorAll('.mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('modeInput').value = btn.dataset.mode;
-  });
-});
-
-document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const mode = document.getElementById('modeInput').value;
-  const prompt = e.target.prompt.value;
-  
-  const btn = e.submitter;
-  const original = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
-
-  try {
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, mode })
-    });
-    const data = await res.json();
-    
-    if (res.ok) {
-      document.getElementById('result').innerHTML = 
-        '<div class="result-box"><h6>AI Response (Cost: $' + data.cost + ')</h6><pre>' + 
-        data.content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + 
-        '</pre></div>';
-      document.getElementById('result').style.display = 'block';
-      // Update usage in UI
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      alert('Error: ' + (data.error || 'Unknown'));
-    }
-  } catch (err) {
-    alert('Network error: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = original;
-  }
-});
-</script>
     `,
     
     login: `
@@ -278,6 +164,130 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
     </div>
   </div>
 </div>
+    `,
+    
+    dashboard: `
+<% const FREE_LIMIT = 5; %>
+<div class="container chat-container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4><i class="fas fa-robot me-2"></i>AI Assistant</h4>
+    <% if (isAdmin) { %>
+      <span class="badge bg-success">Free Tier: $5</span>
+    <% } else { %>
+      <span class="badge bg-warning">Paid Plan</span>
+    <% } %>
+  </div>
+
+  <p>Usage: $<%= usage.toFixed(4) %> 
+    <% if (isAdmin) { %>
+      / $<%= FREE_LIMIT %>
+    <% } %>
+  </p>
+
+  <% if (isAdmin) { %>
+    <div class="usage-bar">
+      <div class="usage-fill bg-success" style="width: <%= Math.min(100, (usage / FREE_LIMIT) * 100) %>%"></div>
+    </div>
+  <% } %>
+
+  <% if ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) { %>
+    <div class="alert alert-warning">
+      <i class="fas fa-exclamation-triangle me-2"></i>
+      <%= isAdmin ? 'Free tier exhausted' : 'Payment required' %>
+    </div>
+  <% } %>
+
+  <!-- Mode selector -->
+  <div class="mb-3">
+    <div class="btn-group" role="group">
+      <button type="button" class="btn btn-outline-primary mode-btn active" data-mode="general">General</button>
+      <button type="button" class="btn btn-outline-success mode-btn" data-mode="code">Code</button>
+      <button type="button" class="btn btn-outline-info mode-btn" data-mode="data">Data</button>
+      <button type="button" class="btn btn-outline-warning mode-btn" data-mode="therapist">Therapist</button>
+    </div>
+    <input type="hidden" id="modeInput" value="general">
+  </div>
+
+  <!-- Chat box -->
+  <div class="chat-box" id="chatBox">
+    <div class="message ai-message">
+      Hello! I'm your AI assistant. How can I help you today?
+    </div>
+  </div>
+
+  <!-- Input form -->
+  <form id="chatForm" class="mt-3">
+    <div class="input-group">
+      <input type="text" class="form-control" id="userInput" placeholder="Type your message..." required
+        <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
+      <button class="btn btn-primary" type="submit"
+        <%= ((isAdmin && usage >= FREE_LIMIT) || (!isAdmin && usage > 0)) ? 'disabled' : '' %>>
+        Send
+      </button>
+    </div>
+  </form>
+</div>
+
+<script>
+let chatHistory = [];
+
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('modeInput').value = btn.dataset.mode;
+  });
+});
+
+document.getElementById('chatForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const userInput = document.getElementById('userInput').value.trim();
+  const mode = document.getElementById('modeInput').value;
+  
+  if (!userInput) return;
+
+  // Add user message to chat
+  addMessageToChat(userInput, 'user');
+  document.getElementById('userInput').value = '';
+  
+  // Disable input during processing
+  const sendBtn = document.querySelector('#chatForm button');
+  sendBtn.disabled = true;
+  sendBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: userInput, mode })
+    });
+    
+    const data = await res.json();
+    
+    if (res.ok) {
+      addMessageToChat(data.content, 'ai');
+      // Auto-scroll to bottom
+      document.getElementById('chatBox').scrollTop = document.getElementById('chatBox').scrollHeight;
+    } else {
+      addMessageToChat('Error: ' + (data.error || 'Unknown'), 'ai');
+    }
+  } catch (err) {
+    addMessageToChat('Network error: ' + err.message, 'ai');
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.innerHTML = 'Send';
+  }
+});
+
+function addMessageToChat(text, sender) {
+  const chatBox = document.getElementById('chatBox');
+  const messageDiv = document.createElement('div');
+  messageDiv.className = sender === 'user' ? 'message user-message' : 'message ai-message';
+  messageDiv.textContent = text;
+  chatBox.appendChild(messageDiv);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+</script>
     `
   };
 
@@ -289,7 +299,7 @@ document.getElementById('aiForm')?.addEventListener('submit', async (e) => {
   return ejs.render(templates.layout, { ...options, body, locals: options });
 };
 
-// Get user from session
+// Get user helper
 async function getUserFromSession(req) {
   if (!req.session || !req.session.userId) return null;
   try {
@@ -301,18 +311,8 @@ async function getUserFromSession(req) {
 }
 
 // Routes
-app.get('/', async (req, res) => {
-  const user = await getUserFromSession(req);
-  const usage = user ? user.usage : 0;
-  const isAdmin = user ? user.isAdmin : false;
-  
-  try {
-    const html = renderTemplate('index', { user, usage, isAdmin });
-    res.send(html);
-  } catch (err) {
-    console.error('Template error:', err);
-    res.status(500).send('Template error');
-  }
+app.get('/', (req, res) => {
+  res.redirect('/login');
 });
 
 app.get('/login', (req, res) => {
@@ -333,15 +333,33 @@ app.post('/login', async (req, res) => {
       return res.send(html);
     }
     req.session.userId = user._id.toString();
-    res.redirect('/');
+    res.redirect('/dashboard'); // ✅ Redirect to dashboard after login
   } catch (err) {
     const html = renderTemplate('login', { error: 'Server error' });
     res.send(html);
   }
 });
 
+app.get('/dashboard', async (req, res) => {
+  const user = await getUserFromSession(req);
+  if (!user) {
+    return res.redirect('/login');
+  }
+  
+  const usage = user.usage;
+  const isAdmin = user.isAdmin;
+  
+  try {
+    const html = renderTemplate('dashboard', { user, usage, isAdmin });
+    res.send(html);
+  } catch (err) {
+    console.error('Dashboard render error:', err);
+    res.status(500).send('Dashboard error');
+  }
+});
+
 app.post('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/'));
+  req.session.destroy(() => res.redirect('/login'));
 });
 
 // AI endpoint
